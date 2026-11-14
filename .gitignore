@@ -1,0 +1,22 @@
+__pycache__/
+*.mp4
+*.mov
+*.webm
+*.png
+*.jpg
+out/
+
+# the pictures this repository shows of itself are kept
+!.claude-plugin/icon.png
+!docs/media/*.jpg
+!docs/media/*.png
+!docs/media/*.gif
+!docs/media/*.mp4
+
+# a person's own notes and taste never belong in the repository: two files an earlier version kept here
+skills/video-decompiler/taste.local.json
+skills/video-decompiler/LENS.local.md
+
+# the worked films' own pictures are part of the skill
+!skills/video-decompiler/library/films/**/media/**/*.jpg
+!skills/video-decompiler/library/films/**/media/**/*.png

@@ -1,0 +1,17 @@
+{
+  "name": "video-decompiler",
+  "description": "Make a short product film as code: take a good film of the kind apart, write yours on one page, build it with picture and sound on one clock, have it read blind, then show a person. Launch films, demos, moving type and brand films, rendered with raea on your own machine.",
+  "author": {
+    "name": "James Dimachkie"
+  },
+  "repository": "https://github.com/JimGHTB12/video-decompiler",
+  "license": "MIT",
+  "keywords": [
+    "video",
+    "motion-graphics",
+    "launch-film",
+    "reverse-engineering",
+    "raea",
+    "skills"
+  ]
+}

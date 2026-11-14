@@ -1,0 +1,16 @@
+{
+  "name": "video-decompiler",
+  "owner": {
+    "name": "James Dimachkie"
+  },
+  "metadata": {
+    "description": "Make a short product film as code: take a good film of the kind apart, write yours on one page, build it with picture and sound on one clock, have it read blind, then show a person. Launch films, demos, moving type and brand films, rendered with raea on your own machine."
+  },
+  "plugins": [
+    {
+      "name": "video-decompiler",
+      "source": "./",
+      "description": "Make a short product film as code: take a good film of the kind apart, write yours on one page, build it with picture and sound on one clock, have it read blind, then show a person. Launch films, demos, moving type and brand films, rendered with raea on your own machine."
+    }
+  ]
+}

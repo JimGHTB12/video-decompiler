@@ -1,0 +1,129 @@
+name: tests
+
+# Every tool is tested against a fault with a known answer (tests/run.py). The tests need no graphics card and no raea:
+# the ones that render say "skipped". One more job renders, twice: it installs raea on a Mac with raea's own installer,
+# sets up by the README's own lines, runs the first-run check, every test with nothing skipped, and then makes a short
+# film whole. Once with the raea release the worked films were checked on, which must pass; and once with whatever
+# the installer gives a stranger that day, pre-releases included (three came out on the day this was published), which
+# is watched and does not fail the run: a fault in a pre-release is news, not this repository's failure. raea is left
+# where its installer puts it and nothing is set, which is what the README promises. On a private copy of this
+# repository the jobs run only when started by hand, so they use no paid minutes unless you ask them to.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    if: github.event_name == 'workflow_dispatch' || github.event.repository.private == false
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: skills/video-decompiler/requirements.txt
+      - uses: oven-sh/setup-bun@v2
+      - name: ffmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: ffmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
+      - name: ffmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg -y --no-progress
+      - name: Python packages
+        run: python -m pip install -r skills/video-decompiler/requirements.txt
+      - name: Tests
+        run: python tests/run.py
+
+  with-raea:
+    if: github.event_name == 'workflow_dispatch' || github.event.repository.private == false
+    name: with-raea (${{ matrix.raea || 'what its installer gives today' }})
+    strategy:
+      fail-fast: false
+      matrix:
+        raea: ["0.1.2", ""]
+    continue-on-error: ${{ matrix.raea == '' }}
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: skills/video-decompiler/requirements.txt
+      - uses: oven-sh/setup-bun@v2
+      - name: ffmpeg
+        run: brew install ffmpeg
+      # Left to itself the installer takes the newest release that has a build for this machine. It asks GitHub for the
+      # list without signing in, and GitHub refuses that from a busy hosted machine (403, "couldn't find a release": it
+      # happened here on the day of release). So the same question is asked here, signed in, with the installer's own
+      # rule, and the installer is told the answer.
+      - name: Which raea
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECKED: ${{ matrix.raea }}
+        run: |
+          v="$CHECKED"
+          if [ -z "$v" ]; then
+            v=$(gh api "repos/shinyobjectz/raea/releases?per_page=30" --jq '[.[] | select(.tag_name | startswith("v")) | select(any(.assets[]; .name | endswith("-macos-arm64.tar.gz")))][0].tag_name')
+            v="${v#v}"
+          fi
+          test -n "$v"
+          echo "raea $v"
+          echo "RAEA_VERSION=$v" >> "$GITHUB_ENV"
+      - name: raea, as its own page says to install it
+        run: curl -fsSL https://raea.io/install | sh
+      - name: Set up and first run, by the README's lines
+        run: |
+          python3 -m venv ~/.venvs/video-decompiler
+          ~/.venvs/video-decompiler/bin/python -m pip install -r skills/video-decompiler/requirements.txt
+          ~/.venvs/video-decompiler/bin/python skills/video-decompiler/tools/vd.py doctor --full
+      - name: Tests, with nothing skipped
+        run: |
+          set -o pipefail
+          ~/.venvs/video-decompiler/bin/python tests/run.py | tee run.txt
+          grep -q " 0 skipped" run.txt
+      # The tests draw moments; this makes a film: the starter, nine seconds, rendered whole, its sound put on, scanned
+      # and given its share copy (under a minute on a hosted Mac). `vd export` ends with exit code 3 when its scan could
+      # not run, so that fails here too; the lines after it check the files as a person would.
+      - name: A short film exported whole
+        timeout-minutes: 25
+        run: |
+          cd "$RUNNER_TEMP"
+          vd() { ~/.venvs/video-decompiler/bin/python "$GITHUB_WORKSPACE/skills/video-decompiler/tools/vd.py" "$@"; }
+          vd new smoke --kind explainer
+          cd smoke
+          vd export
+          cat ~/.vd/out/smoke/scan.txt
+          grep -q "^SCAN smoke.mp4: 270 frames at 30 a second" ~/.vd/out/smoke/scan.txt
+          for f in smoke.mp4 smoke-share.mp4; do
+            test "$(ffprobe -v error -show_entries stream=codec_type -of csv=p=0 ~/.vd/out/smoke/$f | sort | tr '\n' ' ')" = "audio video "
+          done
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: first-run-looks-${{ matrix.raea || 'installer' }}
+          path: |
+            ~/.vd/out/doctor-starter/look.jpg
+            ~/.vd/out/doctor-plusone/look.jpg
+            ~/.vd/out/smoke/smoke-share.mp4
+            ~/.vd/out/smoke/scan.txt
+          if-no-files-found: warn

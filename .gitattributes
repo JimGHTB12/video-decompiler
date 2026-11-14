@@ -1,0 +1,13 @@
+# One line ending in the repository and in every checkout, so a file hashes and compares the same on every system.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.flac binary
+*.mp3 binary
+*.wav binary
+*.gif binary
+*.mp4 binary

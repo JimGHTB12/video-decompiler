@@ -1,0 +1,83 @@
+# Traps
+
+Read when a frame looks wrong. Each is a known raea fault here, with its way out. Run `vd look` before believing a fix.
+
+**Rendering**
+- **Stills in one `--at` call are not independent.** A component that never calls `useCurrentFrame()` keeps an earlier still's output, and which planes go missing depends on which frames share the call. Read the frame in every component. If a still surprises you, render that frame alone.
+- **raea builds a mesh once: changing a shape's size later does nothing.** One film's `<Torus major_radius={r(t)} />` kept the radius it first drew, and stills in one look call showed whatever size the first requested frame gave, so looks disagreed (another hit the same with a `Text3D` whose words change). Fix the shape and size it with `withScale`; give a `Text3D` whose words change one part per wording, named after its words. `vd look` names a part whose own size differs between its moments.
+- **`--at` names files by position, not frame number.** The third still is the third requested frame. Map them back yourself (`vd look` does this).
+- **There is room for about nine frame-sized projective planes.** Past that, the nearest planes vanish without a message. Size each plane's box to what it draws.
+- **A refusal is remembered by the file's content.** Change the file, not only the flags, before you retry.
+- **`--frames N`, `--w`, `--h` and `--fps` are ignored for a registered `<Composition>`** (raea says NOT APPLIED): asking for 60 frames rendered all 570. For a stretch, use a short composition that offsets the frame (`vd render --from A --to B` writes one). For sound alone, `-o OUT.wav` draws no frame (`vd sound`).
+- **A `.json` anywhere under the film's folder makes the next look or render bundle again** (+4 s, 20 s under load): raea keys its bundle on every .ts/.tsx/.js/.json/.css there, and writes OUT.render.json beside each output. Keep outputs outside; `vd` writes to `~/.vd/out/NAME`.
+- **A pattern fill, or nested filtered layers the frame's size, overflows Vello's buffers** ("past Vello's bump buffers"). Flatten the nesting, or cut the picture to what is shown.
+- **Imports outside the entry's folder are refused** (`../x`). `vd new` copies what a film needs into its folder.
+- **A missing easing shows up as a WeakMap error.** `Easing.sine` doesn't exist, and the message is "invalid value used as WeakMap key". Use `Easing.cubic`, `quad`, `exp` or `bezier`. `vd look` and `vd export` run `raea world --no-render` first, which catches it in seconds.
+- **The engine's motion blur can't blur one moving thing over a still background**: the thing keeps a sharp silhouette. Move the camera instead, or average sub-frames: draw the film at four pictures for each frame and average three with `tools/blur.py` (the six steps are at the end of this page).
+
+- **A shader's values can freeze across the stills of one `vd look` call** while the same shader animates correctly in a video. Check a shader on a short clip, or one still a call.
+- **A texture first used part-way through a film may never draw in the export**, though a still of that moment shows it. Mount it from the first frame and hide it with opacity until it is needed. (Seen once; the cause is not known.)
+- **A round, clipped box holding a picture can export as a blank disc while its opacity is below 1.** One test film's plates (an `overflow: hidden` circle round an `<img>`) drew as pale discs for a few frames of the export as they faded, and two readers saw it. Its maker changed their size instead and kept opacity at 1. (Reported by one film's maker; not reproduced here.)
+- **`not applied: "background in a style attribute"` names no element.** In one test film the cause was a colour that had become `rgb(NaN,NaN,NaN)`: a helper that parsed `#RRGGBB` was handed its own `rgb(...)` output. Look in your own colour maths first. (Reported by one film's maker.)
+- **A sine hash in a shader (`fract(sin(dot(p, k)) * 43758.)`) broke into square blocks on one graphics card.** An integer hash did not.
+- **A light-scattering atmosphere, a light and a glTF model together stopped the renderer.** Use the atmosphere without its light and light the scene separately.
+- **Only the first tone-mapping setting in the tree counts.** Two recipes combined keep the first one's.
+- **The engine's motion blur at eight samples left comb-like ghosts on hard edges.** Test it on your own edges before relying on it.
+- **Bounce lighting is visibly grainy off a Mac** (no denoiser there). **Brushed metal reads as matt paint** (no anisotropy). **A photograph is upright on a plane and upside down on a box.**
+- **In the tests here, many separate meshes cost far more than any effect tried.** Thousands of copies belong in instances.
+
+**Pictures and type**
+- **ImagePlane and SVG data-URL textures drop all text and freeze on their first frame in a video.** A still looks right, which hides it. ImagePlane also blurs everything under depth of field. For artwork that changes or holds words, put inline SVG inside `<Screen>` (TECHNIQUES.md, screen-layer).
+- **A lit picture with default tone mapping turns milky** (#ff7a1a came out #f5af85; black came out #757575). Use `unlit` plus `<ToneMapping mode="none" />`. A Screen keeps its colours either way.
+- **Fonts fall back without a word.** On the page, web fonts that aren't installed, "Segoe UI Variable", and names with a word starting in a digit all become a serif. On Windows, Georgia, Bahnschrift, Consolas and Segoe UI drew, and Arial Black fell back to a serif in a later test. Of these only Georgia is also on a Mac, and none is on a plain Linux machine. Do not rely on an installed face: embed the font (`@font-face` with a file in `media/fonts`, or a data URL), as the worked films do and as `kit/lib/faces.ts` does for the older starters.
+- **3D type has its own faces** (tested 12 November 2026, one still). `Text3D` (solid letters) draws Inter, Roboto, Montserrat, Archivo Black, Oswald and League Gothic; Georgia comes out as a serif, Bahnschrift as a plain sans, Consolas as a mono. `RichText` (flat lettering in the scene) draws Inter, Roboto, Montserrat, Georgia, Arial, Bahnschrift and Consolas; it breaks Archivo Black (spacing), Oswald (drops a "g") and League Gothic (letters collide). Both come from `raea/3d`, not `raea/mesh`.
+- **`RichText` has dropped the "fl" pair** ("float" drew as "foat" in one film). Write a zero-width non-joiner between the letters (`"f\u200Cl"` in the string). One test in Georgia drew "float" whole, so check your still.
+- **A viewBox that doesn't start at `0 0`** moves shapes under a transform. Start it at 0 0 and shift with a `<g transform>`.
+- **A Screen turned the wrong way draws nothing and says nothing**: it faces away and is culled. The `rotation` of a Screen, Group, Model, ImagePlane or Decal is Euler XYZ; rows that name `rot_x/rot_y/rot_z` are YXZ, so the same three numbers turn differently. Seen from above, `[-Math.PI / 2, 0, Math.PI]` lies face up; `[-Math.PI / 2, Math.PI, 0]` vanishes. Check one still.
+- **`-webkit-text-stroke` and `background-clip: text` don't draw.** Use SVG `<text>` with a stroke or a gradient fill.
+
+- **`soft_shadow_size` above about 1 gives a noisy, dithered shadow edge.** Near 0.5 the edge is clean.
+- **Overlapping meshes are refused** unless each carries `allowOverlap`.
+- **Two letters of a `Text3D` are two separate solids**: turn the word on its side and one hangs in the air. Join them (a cast bar) or set each down.
+- **Textured spheres and rings (seen in one film):** `Sphere` from `raea/mesh` is an icosphere; with an equirectangular map it draws a jagged zig-zag seam. `Sphere` from `raea/3d` takes `uv={[sectors, stacks]}` and has no seam. `raea/3d` Sphere and Torus have their axis on z, not y: a globe's pole faces the side and a ring stands upright (turn them with `Quat.mul(Quat.fromRotationY(spin), Quat.fromRotationX(-Math.PI / 2))`). `raea/mesh` Torus drew its ring visibly larger than `major_radius`: the Moon, placed at that radius, sat inside it.
+- **A directional fill flattens a room in one step.** Put a `RectLight` where the light would really come from: the window, the sunlit wall.
+
+**Page and parts** (older notes, still true on rc4 as far as anyone has seen)
+- **`Math.random()` gives new numbers every frame.** Seed anything that must hold still from its index.
+- **A bare `<Entity>` with no transform draws nothing.** Give the parent a transform.
+- **Solids from boolean operations have no UVs**, so a tiled texture won't map. Texture a plain mesh placed over the solid.
+- **`filter` draws only inside the element's own box** plus the filter's reach: a wrapper with no size loses everything. Give it a real size.
+- **A filtered or masked layer is a picture its own size on the graphics card.** 36 frame-sized blurred shadows ran an 8 GB card out. Size each to what it holds.
+- **Inside a plane with perspective, keep the layout within about 4000 px of its corner**, or the plane is left out silently. `overflow: hidden` there clips in the wrong place; use `mask-image: linear-gradient(black, black)`.
+- **A plane turned edge-on to the camera lost the graphics device twice.** Avoid exact edge-on planes.
+- **`overflow: hidden` clips absolutely positioned children only when the clipping parent has a position.**
+- **`dangerouslySetInnerHTML` draws nothing.** Write the children as elements.
+- **A picture drawn much smaller than its file shimmers when the camera moves**, and one of 3000-4000 px can come out black in a full render. Make copies near the size shown.
+- **`console.log` in a composition isn't shown; `console.warn` is.**
+
+- **Many large part-transparent layers under one perspective wrapper are refused** ("filtered layer wasn't drawn", Vello's bump buffers). Draw anything at opacity 0.997 or more as solid, and apply perspective only while the tilt is above about 0.01.
+- **An arrival curve on a thing at rest makes it leave at full speed**, and whatever is tied to it (a ground's colour) changes in a frame or two: readers call it a one-frame swap. A thing at rest eases in (`glide`).
+- **A composition id holds letters, digits and hyphens only.**
+- **Source written through a shell heredoc loses its backslashes and breaks on apostrophes and backticks**: TSX, and a Python patch script just the same. Write files with the file tool, and run a patch as a script file.
+
+**Sound**
+- **The transcriber hears words in music** ("Thank you for watching!" in a piano score). `vd measure` treats a known false hearing as no voice; for a film with no voice, give `--no-voice`; with no transcriber on the machine, a film's words are reported `not transcribed`, not as no voice.
+- **raea's `<Mix>` can be heard without the picture.** `raea render ENTRY -o OUT.wav` (rc4) draws no frame; `vd sound ENTRY.tsx` wraps it.
+- **A bell-like run from D4 to E6 takes two instruments.** The VCSL vibraphone and glockenspiel are both CC0: Linden ships vibraphone recordings from F2 to E5 and glockenspiel recordings from G4 to C7. Shift each note at most four semitones from its nearest sample.
+
+**Machine**
+- **A film rendered in stretches can jump where they join, and the cause may not be known.** One film's 90-frame stretches popped at frames 270 and 360 (change 8.9 and 29.9 against about 1.5); the cause is not found yet. An animated AmbientLight was tested and is not it: on rc4 it updates every frame, in stills and in video. `vd render --from/--to` checks each join after the splice and names a frame that pops. Measured on a motion-blurred test film: a range rendered from frame N matched a whole render for its first 3 frames, then differed slightly (up to 46 grey levels at a pixel, mean under 0.05) while the blurred move ran; 8 frames rendered before the range and dropped changed nothing, so there is no lead-in. Whole renders were identical run to run, so `vd export` renders the film whole.
+- **Two renders of one film are not always the same to the last bit.** Stet and Onoma (type and interface on soft colour), exported again from this repository, matched the cuts that were accepted frame for frame. The two films built on large pictures did not: one frame of Plus One drawn six times came out in two variants, two levels apart in 66 pixels (another, drawn five times, came out five ways), and its export matched the accepted cut frame for frame until its pictures arrive and to 46 dB or better after; Linden's matched in a third of its frames and to 44 dB or better in the rest. So to prove a change changed nothing, compare frames as raea draws them (a still, before any encoding), draw each several times with each version, and look for a picture the two versions share byte for byte: one shared picture shows they draw the same thing, and how far two unchanged draws differ is the measure for the rest. An export made again from an unchanged source can come back from raea's cache in a second and proves nothing.
+- **A full video that mixes flat and 3D shots draws its opening twice**: it starts without 3D, meets the first 3D frame, steps the whole timeline and renders every frame again (about a quarter of a render). Nothing simple avoids it; count it in the time.
+- **raea keeps only its last 60 trace sessions** (under two hours on a busy night). When a render runs long, rerun with `raea_run.py --trace` and copy the session folder before it rotates away.
+
+## A camera's blur, in six steps
+
+For a fast move that reads as a strobe. Checked on the older page starter and on the worked film `linden`, which has steps 1 and 2 (its composition is `film-sub`). A film that has those two steps can leave the rest to `vd export`: put `"shutter": {"composition": "film-sub", "sub": 4, "open": 3}` in `score.json`, as `linden` does, and every export draws the many pictures, averages them, puts the sound on and scans the result. Steps 3 to 5 below are the same thing by hand, for a film with no `score.json`; they use raea's own encoder, whose colours are tagged differently from an export's, so do not hold one against the other. Another worked film needs step 1 done to its own root component first, and every function of the frame must then accept a fraction. raea draws the whole composition whatever length you ask for, so count four times the film's frames.
+
+1. In `film.tsx`: `export function Film({ offset = 0, finish = true, sub = 1 })` and `const f = useCurrentFrame() / sub + offset;` (`offset` counts whole frames of the film, so it is added after the division; round `f` down before using it as an index).
+2. In `main.tsx`, one more composition at four times the rate: ``<Composition id={`${FILM_ID}-x4`} component={() => <Film sub={4} />} width={W} height={H} fps={FPS * 4} durationInFrames={FRAMES * 4} />``.
+3. `python SKILL_FOLDER/tools/raea_run.py main.tsx -o ~/.vd/out/NAME/NAME-x4.mp4 --composition film-x4 --quality master` (`film-x4` is the id in `ids.ts` followed by `-x4`: a film that changed its id uses its own)
+4. `python SKILL_FOLDER/tools/blur.py ~/.vd/out/NAME/NAME-x4.mp4 ~/.vd/out/NAME/NAME-blur.mp4 --sub 4 --open 3 --fps 60` (the film's own rate: 60 for the worked films)
+5. `vd sound --onto ~/.vd/out/NAME/NAME-blur.mp4`
+6. `vd scan ~/.vd/out/NAME/NAME-blur-sound.mp4`
