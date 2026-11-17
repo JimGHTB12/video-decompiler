@@ -163,8 +163,10 @@ def peak_mb(cmd):
 def removed(folder, wait=5.0):
     """Remove a test's folder, waiting up to `wait` seconds for a file another process holds: on the hosted Windows
     runners num60.mp4 was still held when the folder was removed (2 runs in 5), after every ffmpeg here had exited and
-    been waited on (most likely a virus scanner reading the new file; not confirmed). A file still held after that is a
-    real leak, and fails."""
+    been waited on. What held it is not known: those runners turn Defender's real-time scanning off and exclude C: and
+    D:, and on a Windows laptop neither 18 runs of this test nor 400 reads killed mid-read and deleted at once left a
+    file held. The last thing done to num60.mp4 is closing film_diff.stream after one frame, which kills its ffmpeg
+    mid-read. A file still held after `wait` is a real leak, and fails."""
     import shutil
     import time
     end = time.monotonic() + wait
