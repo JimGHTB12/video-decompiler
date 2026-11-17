@@ -657,7 +657,8 @@ def one_at_a_time(wait=3600.0, lock=None, what=None, kind="render", gone=None):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    # no abbreviations: raea's own --h (height) was read as short for --help, so the wrapper printed its help and stopped
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], allow_abbrev=False)
     ap.add_argument("entry")
     ap.add_argument("-o", dest="out", required=True)
     ap.add_argument("--timeout", type=float, default=900.0, help="seconds before a render counts as stalled")

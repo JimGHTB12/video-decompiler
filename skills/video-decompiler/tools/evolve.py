@@ -294,7 +294,7 @@ def build_tournament(name: str, brief: str = None, repo_dir: Path = None, agains
     dealt letters A..D in a neutral reads folder, and write the tournament key and two cross-family reader briefs."""
     import lean
     import pack
-    import steal
+    import borrow
     root = Path(name).resolve()
     out_root = lean.outdir(root)
     n_tourn = 1
@@ -304,7 +304,7 @@ def build_tournament(name: str, brief: str = None, repo_dir: Path = None, agains
     # second run wrote over boards an author had worked on, and the film folder held a candidates/ folder (TRAPS.md)
     cands_root = out_root / "tournaments" / f"t{n_tourn}"
     cands_root.mkdir(parents=True, exist_ok=True)
-    import puppet  # one record of a repository's facts: puppet's, which adds the counts the boards print to steal's
+    import puppet  # one record of a repository's facts: puppet's, which adds the counts the boards print to borrow's
     repo_info = puppet.analyze_codebase(Path(repo_dir)) if repo_dir and Path(repo_dir).is_dir() else None
     subject = brief or (repo_info["name"] if repo_info else root.name)
 
@@ -430,9 +430,9 @@ def parse_winner_from_readings(readings_path: Path, mapping: dict = None):
 
 def select_winner(root: Path, letter: str = None, against: Path = None, readings: Path = None, key_file: Path = None):
     """Promote the winning candidate (`A`, `B`, `C`, or `D`, or parsed from `readings`) from `key_file` or the latest
-    `evolve-N-KEY.txt` into `root`, and optionally fit `against`'s moves and colours with vd steal."""
+    `evolve-N-KEY.txt` into `root`, and optionally fit `against`'s moves and colours with vd borrow."""
     import lean
-    import steal
+    import borrow
     root = Path(root).resolve()
     out_root = lean.outdir(root)
     if key_file and Path(key_file).is_file():
@@ -469,7 +469,7 @@ def select_winner(root: Path, letter: str = None, against: Path = None, readings
         # a key promotes what its readers saw: a sketch changed since (or a key from before fingerprints) is not that
         raise SystemExit(f"vd evolve --select: candidate {letter} ({chosen_dir}) is not what its readers saw "
                          f"({'it has changed since' if seen else 'its key has no fingerprint'}). Run vd evolve again and have it read.")
-    # what was pinned or stolen into the film folder before (vd pin's targets, vd steal's dna) is the film's, not the
+    # what was pinned or borrowed into the film folder before (vd pin's targets, vd borrow's dna) is the film's, not the
     # sketch's: it is kept when the sketch's score.json is copied over
     kept = {}
     if (root / "score.json").is_file():
@@ -498,7 +498,7 @@ def select_winner(root: Path, letter: str = None, against: Path = None, readings
         encoding="utf-8",
     )
     if against and Path(against).is_file():
-        steal.compile_dna_cartridge(Path(against).resolve(), out_dir=root)
+        borrow.compile_dna_cartridge(Path(against).resolve(), out_dir=root)
     return chosen_arch, chosen_dir
 
 

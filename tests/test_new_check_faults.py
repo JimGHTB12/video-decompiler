@@ -303,33 +303,33 @@ def spring_curve(t, f, d):
     return 1 + (x0 - c2) * np.exp(a * t) + c2 * np.exp(b * t)
 
 
-def test_steal_recovers_planted_springs_and_says_when_it_cannot():
-    import steal
+def test_borrow_recovers_planted_springs_and_says_when_it_cannot():
+    import borrow
     # the short moves are the 12 to 20 frames SKILL.md asks for; a grid made in move-relative units read 2.2 Hz as 5.0 there
     for f, d, dur in [(2.2, 0.45, 1.0), (3.0, 0.7, 0.5), (1.5, 0.9, 1.2), (4.0, 0.3, 0.8), (2.2, 0.45, 0.2), (2.2, 0.45, 0.25), (3.0, 0.7, 0.3)]:
         v = np.abs(np.diff(spring_curve(np.linspace(0, dur, 25), f, d)))
-        fit = steal.fit_spring_profile(v, dur=dur)
+        fit = borrow.fit_spring_profile(v, dur=dur)
         assert fit["fitted"] and abs(fit["freq"] - f) <= 0.15 and abs(fit["damp"] - d) <= 0.06, ((f, d, dur), fit)
     s = np.linspace(0, 1, 25)
     glide = np.where(s < 0.5, 4 * s ** 3, 1 - (-2 * s + 2) ** 3 / 2)            # inOutCubic, the worked films' glide
-    assert steal.fit_spring_profile(np.abs(np.diff(glide)), dur=0.3)["fitted"] is False, "a glide is no spring"
-    empty = steal.fit_spring_profile([], dur=0.5)
+    assert borrow.fit_spring_profile(np.abs(np.diff(glide)), dur=0.3)["fitted"] is False, "a glide is no spring"
+    empty = borrow.fit_spring_profile([], dur=0.5)
     assert empty["fitted"] is False and empty["mse"] is None, empty
 
 
 
-def test_steal_takes_the_ground_from_the_border_and_the_octave_from_the_film():
-    import steal
+def test_borrow_takes_the_ground_from_the_border_and_the_octave_from_the_film():
+    import borrow
     # broke: the largest colour cluster was taken for the ground (a film of dark paintings on paper got the paintings'
     # navy), and the accent was the most saturated colour even one step from the ground
     holds = [{"t0": 0, "t1": 4, "ground": "#f3eadb", "palette": [["#1d2a44", 0.6], ["#f3eadb", 0.3], ["#e0462c", 0.1]], "bands": [0.1]},
              {"t0": 4, "t1": 6, "ground": "#f2e9da", "palette": [["#1d2a44", 0.7], ["#f3eadb", 0.3]], "bands": [0.1]}]
-    pal = steal.extract_palette_and_ink({"holds": holds})
+    pal = borrow.extract_palette_and_ink({"holds": holds})
     assert pal["ground"] in ("#f3eadb", "#f2e9da") and pal["accent"] == "#e0462c" and pal["is_dark"] is False, pal
     # broke: Linden's 100 BPM, read as 200, was set at 18 frames a beat; the octave nearest the film's own beat is taken
     m = {"duration": 30.0, "events": [0.0], "sound": {"tempo": {"bpm": 200.0, "octave": [100.0, 400.0]}, "onsets": []}}
-    assert steal.compile_beat_table(m, near_fb=36)[0]["FB"] == 36
-    assert steal.compile_beat_table(m)[0]["FB"] == 18, "with no film's beat to go by, the tempo read is kept"
+    assert borrow.compile_beat_table(m, near_fb=36)[0]["FB"] == 36
+    assert borrow.compile_beat_table(m)[0]["FB"] == 18, "with no film's beat to go by, the tempo read is kept"
 
 
 def test_evolve_for_a_repository_writes_its_counts_on_every_board():

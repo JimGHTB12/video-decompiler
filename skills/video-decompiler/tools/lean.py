@@ -203,7 +203,7 @@ def usage_log(cmd, film, seconds, path=None):
         pass
 
 
-LEAN_ONLY = {"look", "export", "pack", "pin", "profile", "scan", "steal", "capture", "launch", "foley", "evolve", "playable", "audio", "bridge"}
+LEAN_ONLY = {"look", "export", "pack", "pin", "profile", "scan", "borrow", "steal", "capture", "launch", "foley", "evolve", "playable", "audio", "bridge"}
 
 
 def claims(argv):
@@ -1942,14 +1942,14 @@ def cmd_profile(a):
     return p.returncode
 
 
-# ---------------------------------------------------------------- steal, capture, launch, foley, evolve, playable
+# ---------------------------------------------------------------- borrow, capture, launch, foley, evolve, playable
 
-def cmd_steal(a):
-    """vd steal (not proven): a reference's moves fitted to springs and curves, and its held colours, into dna.json,
+def cmd_borrow(a):
+    """vd borrow (not proven): a reference's moves fitted to springs and curves, and its held colours, into dna.json,
     kit/dna.gen.ts and REFERENCE.md."""
-    import steal
+    import borrow
     d = Path(a.out).resolve() if getattr(a, "out", None) else film_dir(a.film, required=False)
-    out_dir, _dna = steal.compile_dna_cartridge(
+    out_dir, _dna = borrow.compile_dna_cartridge(
         ref_video=Path(a.ref),
         out_dir=d,
         repo_dir=Path(a.for_repo) if getattr(a, "for_repo", None) else None,
@@ -2154,6 +2154,9 @@ def home(argv):
 
 def main(argv=None):
     argv = home(list(sys.argv[1:] if argv is None else argv))
+    if argv and argv[0] == "steal":   # 0.2.0's name for vd borrow: it still runs, and says what it is called now
+        print("vd steal is now vd borrow; running vd borrow.", file=sys.stderr)
+        argv[0] = "borrow"
     ap = argparse.ArgumentParser(prog="vd", description=__doc__.split("\n\n")[0], formatter_class=argparse.RawDescriptionHelpFormatter)
     NP = 'Not proven on a film (SKILL.md, "Newer commands"). '  # the newer commands' help says so where an agent reads it
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -2235,11 +2238,11 @@ def main(argv=None):
     s.add_argument("--transcript", action="append")
     s.add_argument("--since", help="only the session from this UTC time (ISO), for a film made inside a longer session")
     s.add_argument("--until", help="only the session up to this UTC time (ISO)"); s.set_defaults(fn=cmd_profile)
-    s = sub.add_parser("steal", help="not proven: a reference's fitted moves and colours",
+    s = sub.add_parser("borrow", help="not proven: a reference's fitted moves and colours",
                        description=NP + "Fits each move the reference makes to a spring (how fast, how damped) and a curve, and takes its held colours, into dna.json, kit/dna.gen.ts and a REFERENCE.md to finish by TAKE-APART.md. A move with no usable profile is marked unfitted. It pins no targets: run vd pin REF as well, since vd measure reads pin's numbers.")
     s.add_argument("ref", metavar="REF.mp4"); s.add_argument("--for", dest="for_repo", metavar="REPO", help="also record this repository's counts in dna.json (nothing reads them yet)")
     s.add_argument("-o", "--out", dest="out", help="destination film folder"); s.add_argument("--k", type=int, default=5)
-    s.add_argument("--like", choices=("plusone", "stet", "onoma", "linden"), help="the worked film to copy when steal makes a new film folder (plusone, stet, onoma, linden): chosen, never guessed"); s.set_defaults(fn=cmd_steal)
+    s.add_argument("--like", choices=("plusone", "stet", "onoma", "linden"), help="the worked film to copy when borrow makes a new film folder (plusone, stet, onoma, linden): chosen, never guessed"); s.set_defaults(fn=cmd_borrow)
     s = sub.add_parser("capture", help="not proven: a repository's counts or a command's output, as a plane your film imports",
                        description=NP + "Writes kit/puppet.gen.ts (the repository's counts, read by file and name patterns, so check them; or, with --cmd, the command's real output lines and times) and kit/PuppetPlane.tsx, a plane that shows them. Your film must import the plane itself. The command runs with no shell.")
     s.add_argument("--cmd", dest="cmd_str", help="a program and its arguments, run with no shell, its output lines recorded with their times")
@@ -2262,7 +2265,7 @@ def main(argv=None):
     s.add_argument("--brief", help="the subject, in a line, written on each sketch's board (default: the repository's name or the folder's)")
     s.add_argument("--seed", type=int, default=None); s.add_argument("--select", choices=("A", "B", "C", "D"), help="make the film folder that sketch's film (what was in it moves to ~/.vd/out/NAME/before-select-N); refused if the sketch changed since it was read")
     s.add_argument("--readings", help="sum the readers' ranks in READINGS.md and promote the top sketch; readers rank sparse sketches higher, so prefer --select with the person's pick")
-    s.add_argument("--key", help="explicit evolve-N-KEY.txt path"); s.add_argument("--mutate", help="nearest reference MP4 to pin/steal into the winning candidate"); s.set_defaults(fn=cmd_evolve)
+    s.add_argument("--key", help="explicit evolve-N-KEY.txt path"); s.add_argument("--mutate", help="nearest reference MP4 to pin/borrow into the winning candidate"); s.set_defaults(fn=cmd_evolve)
     s = sub.add_parser("playable", help="not proven: a browser page that imitates the film, for scrubbing",
                        description=NP + "Builds the film's code against a small stand-in for raea into ~/.vd/out/NAME/playable/index.html, scrubbed with the wheel. It is not the film: raea does not draw it, nothing compares its frames with the export, and parts of the kit (Freeze in kit/lib/finish.tsx, 3D) do not build. Needs esbuild or bun.")
     s.add_argument("entry", nargs="?"); s.add_argument("-o", help="output directory (default ~/.vd/out/NAME/playable)"); s.set_defaults(fn=cmd_playable)

@@ -161,8 +161,8 @@ def counts_record(repo_data):
 
 def analyze_codebase(repo_dir: Path):
     """Extract verified AST & git facts from `repo_dir`: functions, classes, files, tests, commits, and real lines."""
-    import steal
-    base = steal.inspect_repo(repo_dir)
+    import borrow
+    base = borrow.inspect_repo(repo_dir)
     repo_dir = Path(repo_dir).resolve()
     skip = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"}
     py_funcs, py_classes, test_count, total_lines = 0, 0, 0, 0

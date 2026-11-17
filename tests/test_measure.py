@@ -316,7 +316,7 @@ def a_short_window_or_broken_sound_is_not_measured():
 def tempo_known():
     """A drum pattern at 112.5 BPM (kick on each beat, hat on each half beat, accent every bar) is read as 112.5.
     broke: measure.audio took the highest level-autocorrelation lag in 60-200 BPM, then halved it; on the four accepted
-    films it read 150, 240, 222 and 67 BPM for 150, 120, 112.5 and 100, and steal pinned those as the film's clock."""
+    films it read 150, 240, 222 and 67 BPM for 150, 120, 112.5 and 100, and borrow pinned those as the film's clock."""
     sys.path.insert(0, str(TOOLS))
     import measure
     bpm, dur = 112.5, 12.0

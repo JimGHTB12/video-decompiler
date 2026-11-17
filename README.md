@@ -26,7 +26,7 @@ Five things here stand in for what an agent lacks:
 - **Traps, and a queue.** More than fifty known faults of the engine, each with its way out. Two of them: a mesh is built once, so resizing a shape later does nothing; past about nine frame-sized planes in perspective, the nearest vanish without a message. And one render at a time on a machine, however many agents share it. ([`TRAPS.md`](skills/video-decompiler/TRAPS.md))
 
 
-Eight newer commands came after the four films, and no accepted film has been made through them: cleaning a recorded voice and making a music track the film's beat (`vd audio`), handing the cuts to an editor (`vd bridge`), fitting a reference's moves (`vd steal`), putting a repository's counts on screen (`vd capture`, `vd launch`), a sound track made by rule from the film's moves (`vd foley`), four world sketches for readers (`vd evolve`), and a browser page that imitates the film (`vd playable`). The export's scan also checks for flashing now. [`SKILL.md`](skills/video-decompiler/SKILL.md) lists them apart from the steps, with what each does not yet do.
+Eight newer commands came after the four films, and no accepted film has been made through them: cleaning a recorded voice and making a music track the film's beat (`vd audio`), handing the cuts to an editor (`vd bridge`), fitting a reference's moves (`vd borrow`), putting a repository's counts on screen (`vd capture`, `vd launch`), a sound track made by rule from the film's moves (`vd foley`), four world sketches for readers (`vd evolve`), and a browser page that imitates the film (`vd playable`). The export's scan also checks for flashing now. [`SKILL.md`](skills/video-decompiler/SKILL.md) lists them apart from the steps, with what each does not yet do.
 
 Whether these make a film started cold better than the engine alone would has not been measured. [The record](docs/EVIDENCE.md) says what has.
 
@@ -140,7 +140,7 @@ Use the video-decompiler skill to make me a film like PATH/TO/FILM.mp4, for PROD
 - [`BOARD.md`](skills/video-decompiler/BOARD.md), [`TAKE-APART.md`](skills/video-decompiler/TAKE-APART.md): the film on one page, and how to read someone else's.
 - [`EYES.md`](skills/video-decompiler/EYES.md): looking, the scan, the blind readers' briefs word for word, and the person.
 - [`TECHNIQUES.md`](skills/video-decompiler/TECHNIQUES.md), [`TRAPS.md`](skills/video-decompiler/TRAPS.md): what is proven to draw, and the known engine faults with their ways out.
-- `tools/vd.py`: the front door (`doctor`, `new`, `look`, `sound`, `render`, `export`, `scan`, `pack`, `measure`, `pin`, `profile`; and, not yet proven on a film, `steal`, `capture`, `launch`, `foley`, `evolve`, `playable`, `audio`, `bridge`).
+- `tools/vd.py`: the front door (`doctor`, `new`, `look`, `sound`, `render`, `export`, `scan`, `pack`, `measure`, `pin`, `profile`; and, not yet proven on a film, `borrow`, `capture`, `launch`, `foley`, `evolve`, `playable`, `audio`, `bridge`).
 - `library/films/`: the worked films. The rest of `library/` is older starters and recipes, kept for the unproven kinds. Every film folder `vd new` makes carries `LICENSE-video-decompiler.txt`, the MIT notice for the code copied into it.
 
 ## What it writes on your machine
@@ -169,7 +169,7 @@ From the repository's folder, with the environment's Python:
 python tests/run.py
 ```
 
-It runs every test and says what passed, failed and was skipped. Each tool is tested against a fault with a known answer. On every change the same tests run on Linux, Windows and macOS, and twice more on a Mac that installs raea as its page says and sets up by the lines above, where nothing is skipped and a short film is then exported whole. One of the two uses raea 0.1.2 and must pass; the other uses whatever raea's installer gives that day, pre-releases included, and is watched: [![tests](https://github.com/JimGHTB12/video-decompiler/actions/workflows/tests.yml/badge.svg)](https://github.com/JimGHTB12/video-decompiler/actions/workflows/tests.yml)
+It runs every test, four at a time (`--jobs 1` runs them in turn), and says what passed, failed and was skipped. Each tool is tested against a fault with a known answer. On every change the same tests run on Linux, Windows and macOS, and twice more on a Mac that installs raea as its page says and sets up by the lines above, where nothing is skipped and a short film is then exported whole. One of the two uses raea 0.1.2 and must pass; the other uses whatever raea's installer gives that day, pre-releases included, and is watched: [![tests](https://github.com/JimGHTB12/video-decompiler/actions/workflows/tests.yml/badge.svg)](https://github.com/JimGHTB12/video-decompiler/actions/workflows/tests.yml)
 
 ## Rights
 

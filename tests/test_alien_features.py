@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The newer commands, none proven on a film, each run once on a clean input or a small planted one (their planted-fault
 tests are in test_new_check_faults.py, test_audio_faults.py and test_bridge_capture_faults.py):
-  vd steal (fitted moves and colours), vd capture and vd launch (a repository's counts as a plane), vd foley (a track made
+  vd borrow (fitted moves and colours), vd capture and vd launch (a repository's counts as a plane), vd foley (a track made
   by rule from the film's code), vd look's two pixel checks, vd evolve (four sketches as a blind line-up), vd playable (a
   browser imitation of the film), vd scan's flash check, vd audio, vd bridge, and vd.py routing every command.
 """
@@ -25,7 +25,7 @@ import lean  # noqa: E402
 import look  # noqa: E402
 import playable  # noqa: E402
 import puppet  # noqa: E402
-import steal  # noqa: E402
+import borrow  # noqa: E402
 
 
 def test_look_raycasts_weber_contrast_and_saccade_jumps():
@@ -201,7 +201,7 @@ def test_foley_synthesizes_physical_sound_from_telemetry():
         assert lufs is not None and abs(float(lufs) - (-15.0)) <= 1.2 and float(tp) < -1.0, (lufs, tp)
 
 
-def test_steal_compiles_motion_dna_cartridge():
+def test_borrow_compiles_motion_dna_cartridge():
     ref_mp4 = ROOT / "docs" / "media" / "stet.mp4"
     assert ref_mp4.is_file(), f"missing sample video {ref_mp4}"
     with tempfile.TemporaryDirectory() as tmp:
@@ -209,13 +209,13 @@ def test_steal_compiles_motion_dna_cartridge():
         repo_dir.mkdir()
         (repo_dir / "README.md").write_text("# SampleEngine\nDeterministic sub-millisecond stream compiler.\n", encoding="utf-8")
         (repo_dir / "engine.py").write_text("def compile_stream(x):\n    return x * 2\n", encoding="utf-8")
-        out_film = Path(tmp) / "stolen-film"
+        out_film = Path(tmp) / "borrowed-film"
         try:
-            lean.main(["steal", str(ref_mp4), "-o", str(out_film), "--k", "2"])
-            raise AssertionError("steal made a new film folder without being told which worked film to copy")
+            lean.main(["borrow", str(ref_mp4), "-o", str(out_film), "--k", "2"])
+            raise AssertionError("borrow made a new film folder without being told which worked film to copy")
         except SystemExit as e:
             assert "--like" in str(e) and not out_film.exists(), e
-        code = lean.main(["steal", str(ref_mp4), "--for", str(repo_dir), "-o", str(out_film), "--k", "2", "--like", "stet"])
+        code = lean.main(["borrow", str(ref_mp4), "--for", str(repo_dir), "-o", str(out_film), "--k", "2", "--like", "stet"])
         assert code == 0
         dna_json = out_film / "dna.json"
         dna_ts = out_film / "kit" / "dna.gen.ts"
@@ -232,9 +232,9 @@ def test_steal_compiles_motion_dna_cartridge():
         # a cached measure made by another measure.py is measured again, not trusted
         import hashlib
         import measure
-        m_dir = Path.home() / ".vd" / "measures" / ("steal-" + hashlib.sha1(ref_mp4.read_bytes()).hexdigest()[:12])
+        m_dir = Path.home() / ".vd" / "measures" / ("borrow-" + hashlib.sha1(ref_mp4.read_bytes()).hexdigest()[:12])
         (m_dir / "measure.json").write_text(json.dumps({"version": 0}), encoding="utf-8")
-        assert lean.main(["steal", str(ref_mp4), "-o", str(out_film), "--k", "2"]) == 0, "in a film folder no --like is needed"
+        assert lean.main(["borrow", str(ref_mp4), "-o", str(out_film), "--k", "2"]) == 0, "in a film folder no --like is needed"
         assert json.loads((m_dir / "measure.json").read_text(encoding="utf-8"))["version"] == measure.VERSION
         ts_text = dna_ts.read_text(encoding="utf-8")
         assert "export const DNA_SPRING =" in ts_text and "export const DNA_PALETTE =" in ts_text
@@ -322,8 +322,8 @@ def test_evolve_packs_four_blind_world_candidates_and_selects_winner():
                     "## Reader 1 (Claude)\nRANKING: B > D > A > C\n\n## Reader 2 (GPT)\nRANKING: B > A > D > C\n",
                     encoding="utf-8",
                 )
-                # what vd pin or vd steal put in the film folder before is kept when the winner is copied in
-                target.mkdir(exist_ok=True)   # a film folder vd pin or vd steal has written into
+                # what vd pin or vd borrow put in the film folder before is kept when the winner is copied in
+                target.mkdir(exist_ok=True)   # a film folder vd pin or vd borrow has written into
                 sj = target / "score.json"
                 old = json.loads(sj.read_text(encoding="utf-8")) if sj.is_file() else {}
                 sj.write_text(json.dumps({**old, "pinned": {"from": "ref.mp4"}, "dna": "dna.json", "targets_all": {"x": 1}}), encoding="utf-8")
@@ -382,6 +382,33 @@ def test_playable_exports_interactive_runtime_twin():
                 assert (out_play2 / "media" / "sound.wav").read_bytes() == built.read_bytes(), "the current mix"
         finally:
             built.unlink(missing_ok=True)
+
+
+def test_playable_builds_every_worked_film_against_its_raea_stand_in():
+    """vd playable bundles a film against a stand-in for raea (playable.py's RAEA_SHIM_TS), not raea itself, so the
+    stand-in can fall behind what films use. The bundler refuses an import the stand-in does not export: every worked
+    film is built through it here, so a name a film uses and the stand-in lacks fails this test, not a person's page."""
+    if playable.find_esbuild() is None and playable.find_bun() is None:
+        print("skipped: neither esbuild nor bun is installed")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        for like in ("stet", "onoma", "plusone", "linden"):
+            d = Path(tmp) / like
+            assert lean.main(["new", str(d), "--like", like]) == 0
+            out_play = Path(tmp) / ("play-" + like)
+            assert lean.main(["playable", "--film", str(d), "-o", str(out_play)]) == 0, like
+            assert (out_play / "bundle.js").stat().st_size > 5000 and (out_play / "index.html").is_file(), like
+        # the control: an import the stand-in does not have stops the build (so the four builds above prove the names)
+        d = Path(tmp) / "stet"
+        entry = lean.entry_of(d)
+        # used, as a film uses what it imports (TypeScript drops an import nothing uses, as it may be a type)
+        entry.write_text('import { NotInRaea } from "raea";\nconsole.warn(NotInRaea);\n' + entry.read_text(encoding="utf-8"),
+                         encoding="utf-8")
+        try:
+            code = lean.main(["playable", "--film", str(d), "-o", str(Path(tmp) / "play-bad")])
+        except SystemExit as e:
+            code = e.code
+        assert code not in (0, None), "a name the stand-in lacks must stop the build"
 
 
 def test_flash_scan_catches_wcag_231_flashing_and_wcag_45_contrast():

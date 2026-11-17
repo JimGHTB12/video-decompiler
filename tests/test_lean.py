@@ -415,9 +415,17 @@ def test_every_command_ends_on_the_path_it_made():
     # each command that makes something records it; main prints the last one
     src = (TOOLS / "lean.py").read_text(encoding="utf-8")
     for cmd in ("cmd_new", "cmd_look", "cmd_sound", "cmd_render", "cmd_export", "cmd_measure", "cmd_pin", "cmd_pack", "cmd_profile", "cmd_scan",
-                "cmd_steal", "cmd_capture", "cmd_launch", "cmd_foley", "cmd_evolve", "cmd_playable", "cmd_audio", "cmd_bridge"):
+                "cmd_borrow", "cmd_capture", "cmd_launch", "cmd_foley", "cmd_evolve", "cmd_playable", "cmd_audio", "cmd_bridge"):
         body = src.split(f"def {cmd}(", 1)[1].split("\ndef ", 1)[0]
         assert "made_it(" in body, f"{cmd} doesn't say what it made"
+
+
+def test_steal_still_runs_as_borrow():
+    # 0.2.0 called vd borrow vd steal: a person's `vd steal` still runs, through the front door, and says the new name
+    import subprocess
+    p = subprocess.run([sys.executable, "-X", "utf8", str(TOOLS / "vd.py"), "steal", "--help"], capture_output=True, text=True,
+                       encoding="utf-8")
+    assert p.returncode == 0 and "vd steal is now vd borrow" in p.stderr and "--like" in p.stdout, (p.stdout, p.stderr)
 
 
 def test_export_help_says_where_the_film_goes():

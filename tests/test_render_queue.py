@@ -236,6 +236,18 @@ def test_bad_arguments_delete_nothing():
         assert all((d / n).read_text() == "keep me" for n in ("edit.final.tsx", "final.mp4", "precious.mp4")), f"{args} deleted a file"
 
 
+def test_raeas_own_short_flags_reach_raea():
+    # broke: the wrapper's parser took raea's --h (the height) as short for its own --help, printed its help and exited
+    # 0 without rendering; abbreviations are off, so --h, --w and --fps go to raea untouched
+    import os
+    d = Path(tempfile.mkdtemp())
+    (d / "film.tsx").write_text("export {};")
+    env = dict(os.environ, RAEA_BIN=sys.executable, RAEA_RUN_ALONE="0")
+    p = subprocess.run([sys.executable, "-X", "utf8", str(TOOLS / "raea_run.py"), "film.tsx", "-o", "out.mp4", "--h", "90"],
+                       cwd=d, env=env, capture_output=True, text=True)
+    assert "show this help message" not in p.stdout + p.stderr, "--h is raea's, not the wrapper's --help"
+
+
 def test_every_caller_is_refused_before_anything_is_deleted():
     # broke: only the command line checked its arguments, so raea_run.render("missing.tsx", "precious.mp4"), as other tools
     # call it, deleted the film before raea refused the entry; and --at=0,1 was taken for a single file where --at 0,1
@@ -257,7 +269,7 @@ def test_every_caller_is_refused_before_anything_is_deleted():
 def main():
     for t in (test_a_second_render_waits_for_the_first, test_a_waiting_look_goes_before_a_waiting_render, test_the_queue_can_be_turned_off, test_a_direct_caller_waits_for_a_render,
               test_the_command_line_takes_the_lock_once, test_a_render_that_ends_while_waiting_is_not_a_stall, test_a_clock_correction_does_not_end_the_wait,
-              test_where_raea_and_its_output_are, test_bad_arguments_delete_nothing,
+              test_where_raea_and_its_output_are, test_bad_arguments_delete_nothing, test_raeas_own_short_flags_reach_raea,
               test_every_caller_is_refused_before_anything_is_deleted):
         t()
         print("ok", t.__name__)

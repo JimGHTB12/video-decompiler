@@ -5,10 +5,10 @@
   new NAME --kind KIND                a film folder that starts from a working page film (explainer, launch, vertical, app)
   new NAME --like FILM                a copy of a whole worked film from library/films (`vd new --help` lists them)
   look, sound, render, export, scan, pack, measure, pin, profile   the film's commands (tools/lean.py; `vd COMMAND --help`)
-  steal, capture, launch, foley, evolve, playable, audio, bridge    newer commands, not proven on a film (SKILL.md)
+  borrow, capture, launch, foley, evolve, playable, audio, bridge    newer commands, not proven on a film (SKILL.md)
 
 Every command leaves one line in ~/.vd/usage.log. What a command renders goes to ~/.vd/out/NAME, outside the film, and reader
-packs to ~/.vd/reads; `new`, `pin`, `steal`, `capture`, `launch`, `foley`, `evolve`, `audio` and a film's own sound.py write in the film folder. Nothing is sent anywhere.
+packs to ~/.vd/reads; `new`, `pin`, `borrow`, `capture`, `launch`, `foley`, `evolve`, `audio` and a film's own sound.py write in the film folder. Nothing is sent anywhere.
 """
 import argparse
 import importlib.util
@@ -203,7 +203,7 @@ def main(argv=None):
     for name, what in (("new", "a film folder that starts from a working film"), ("look", "many moments as one picture"), ("sound", "the sound with no picture"),
                        ("render", "render seconds A..B only"), ("export", "the finished film, scanned"), ("scan", "pops, holds and level of a finished film"),
                        ("pack", "a blind side-by-side pack for readers"), ("measure", "the gap table"), ("pin", "a reference's numbers into score.json"),
-                       ("profile", "minutes by class for the session"), ("steal", "not proven: a reference's fitted moves and colours"),
+                       ("profile", "minutes by class for the session"), ("borrow", "not proven: a reference's fitted moves and colours"),
                        ("capture", "not proven: a repository's counts or a command's output, as a plane"), ("launch", "not proven: a copy of stet with a repository's counts beside it"),
                        ("foley", "not proven: a sound track made by rule from the film's code"), ("evolve", "not proven: four world sketches as a blind line-up"),
                        ("playable", "not proven: a browser page that imitates the film"), ("audio", "not proven: clean a voice, measure a track, draw its sound"),
