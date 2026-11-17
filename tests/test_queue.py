@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parent.parent / "skills" / "video-decompiler" / "tools"
@@ -325,6 +326,94 @@ def test_a_renderer_that_could_not_be_tied_to_its_command_is_said():
     finally:
         child.kill()
         child.wait()
+
+
+def test_waiters_arriving_together_are_all_listed():
+    # broke: each waiter read the shared .waiting list, added itself and wrote it back, so two arriving together lost one,
+    # and heavy.py could start a compile while a render it no longer saw was waiting
+    with tempfile.TemporaryDirectory() as home:
+        lock = Path(home) / "raea_run.lock"
+        code = (f"import sys, time; sys.path.insert(0, {str(TOOLS)!r}); import raea_run; from pathlib import Path\n"
+                f"raea_run._waiting(Path({str(lock)!r}), True)\ntime.sleep(20)")
+        # the base interpreter, not a venv launcher whose real Python is a child with another pid
+        procs = [subprocess.Popen([getattr(sys, "_base_executable", sys.executable), "-c", code], env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)}) for _ in range(12)]
+        try:
+            t = time.monotonic()
+            while len(raea_run.waiting_pids(lock)) < 12 and time.monotonic() - t < 15:
+                time.sleep(0.2)
+            assert raea_run.waiting_pids(lock) == {str(p.pid) for p in procs}, f"all twelve waiters are listed: {raea_run.waiting_pids(lock)}"
+        finally:
+            for p in procs:
+                p.kill()
+                p.wait()
+        assert raea_run.waiting_pids(lock) == set(), "a waiter that has gone is not listed"
+        folder = Path(str(lock) + ".waiting.d")
+        assert [p.name for p in folder.iterdir()] == [], "and its file is removed"
+        # a number Windows has handed to a newer process: a file naming a living pid with another start time
+        (folder / str(os.getpid())).write_text("12345.0", encoding="utf-8")
+        assert raea_run.waiting_pids(lock) == set(), "a reused pid is not the waiter that left the file"
+        raea_run._waiting(lock, True)
+        assert raea_run.waiting_pids(lock) == {str(os.getpid())}, "a waiter that is there is listed"
+        raea_run._waiting(lock, False)
+        assert raea_run.waiting_pids(lock) == set()
+
+
+def test_a_holder_that_lets_go_leaves_no_gate_file():
+    # broke: each holder's .under.<pid> gate stayed beside the lock after it let go; one laptop had gathered 1,016
+    with tempfile.TemporaryDirectory() as home:
+        lock = Path(home) / "raea_run.lock"
+        held = raea_run.one_at_a_time(wait=5, lock=lock, what="test", kind="heavy")
+        # a job this holder starts takes its turn under it and goes: what it wrote beside the gate goes with the holder
+        code = (f"import sys; sys.path.insert(0, {str(TOOLS)!r}); import raea_run; from pathlib import Path" + chr(10) +
+                f"h = raea_run.one_at_a_time(wait=5, lock=Path({str(lock)!r}), what='child', kind='look'); h.close()")
+        subprocess.run([getattr(sys, "_base_executable", sys.executable), "-c", code], check=True, timeout=60,
+                       env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)})
+        held.close()
+        left = [p.name for p in Path(home).iterdir() if ".under." in p.name or p.name.endswith(".d")]
+        assert left == [], f"no gate file is left: {left}"
+
+
+
+def test_a_child_finds_its_parents_hold_with_no_note():
+    # broke: on a disk too full to write the holder's note, a job started by the holder could not see its parent held
+    # the queue and waited on it until its time ran out
+    with tempfile.TemporaryDirectory() as home:
+        lock = Path(home) / "raea_run.lock"
+        held = raea_run.one_at_a_time(wait=5, lock=lock, what="test", kind="heavy")
+        try:
+            raea_run.holder_file(lock).unlink()                      # the note a full disk could not write
+            code = (f"import sys; sys.path.insert(0, {str(TOOLS)!r}); import raea_run; from pathlib import Path" + chr(10) +
+                    f"print(raea_run.held_above(Path({str(lock)!r})))")
+            out = subprocess.run([getattr(sys, "_base_executable", sys.executable), "-c", code], capture_output=True, text=True, timeout=60,
+                                 env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)})
+            assert out.stdout.strip() == str(os.getpid()), (out.stdout, out.stderr)
+        finally:
+            held.close()
+        assert not raea_run.lock_busy(lock), "and the lock is free once the holder lets go"
+
+
+def test_a_heavy_job_killed_by_force_keeps_the_queue_shut_while_it_runs():
+    # broke (macOS and Linux): heavy.py's job outlived its wrapper killed by force, and the queue opened under it
+    if os.name == "nt":
+        print("not run on Windows: there the job ends with its wrapper (die_with_us)")
+        return
+    import signal
+    with tempfile.TemporaryDirectory() as home:
+        env = {**clean_env(), "HOME": home, "USERPROFILE": home}
+        job = subprocess.Popen([sys.executable, str(TOOLS / "heavy.py"), "--now", "--", sys.executable, "-c", "import time; time.sleep(8)"],
+                               env=env, start_new_session=True)
+        lock = Path(home) / ".raea" / "raea_run.lock"
+        t = time.monotonic()
+        while not (lock.exists() and raea_run.lock_busy(lock)) and time.monotonic() - t < 20:
+            time.sleep(0.2)
+        os.kill(job.pid, signal.SIGKILL)
+        job.wait()
+        time.sleep(0.5)
+        assert raea_run.lock_busy(lock), "the job still running holds the queue after its wrapper was killed"
+        t = time.monotonic()
+        while raea_run.lock_busy(lock) and time.monotonic() - t < 20:
+            time.sleep(0.2)
+        assert not raea_run.lock_busy(lock), "and lets it go when it ends"
 
 
 if __name__ == "__main__":

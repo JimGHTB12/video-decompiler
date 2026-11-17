@@ -393,20 +393,53 @@ def note_holder(lock, what, kind):
         pass
 
 
-def waiting_pids(lock, name=".waiting"):
-    w = Path(str(lock) + name)
+def _alive(pid, born):
+    """Whether `pid` is still the process that wrote `born` (its start time): a number Windows has handed to a newer
+    process is not the waiter that left it."""
     try:
-        return {p for p in (w.read_text(encoding="utf-8").split() if w.exists() else []) if p.isdigit() and psutil.pid_exists(int(p))}
+        return abs(psutil.Process(pid).create_time() - born) < 1.0
+    except (psutil.Error, ValueError):
+        return False
+
+
+def waiting_pids(lock, name=".waiting"):
+    """The living pids waiting for the queue: one file per waiter in a folder beside the lock, holding its start time.
+    (One shared list, read, changed and written back by each waiter, lost a waiter whenever two arrived together: the
+    second wrote back a list read before the first had added itself.) A file whose process has gone is removed here, so
+    a waiter that was killed is not counted again when its number is reused."""
+    w = Path(str(lock) + name + ".d")
+    out = set()
+    try:
+        files = [p for p in w.iterdir() if p.name.isdigit()]
     except OSError:
-        return set()
+        return out
+    for f in files:
+        try:
+            born = float(f.read_text(encoding="utf-8") or "nan")
+        except (OSError, ValueError):
+            continue  # being written this moment: counted on the next look
+        if _alive(int(f.name), born):
+            out.add(f.name)
+        else:
+            try:
+                f.unlink()
+            except OSError:
+                pass
+    return out
 
 
 def _waiting(lock, add, name=".waiting"):
-    pids = waiting_pids(lock, name)
-    pids = pids | {str(os.getpid())} if add else pids - {str(os.getpid())}
+    w = Path(str(lock) + name + ".d")
+    me = w / str(os.getpid())
     try:
-        Path(str(lock) + name).write_text(" ".join(sorted(pids)), encoding="utf-8")
-    except OSError:
+        if add:
+            w.mkdir(exist_ok=True)
+            tmp = w / f".{os.getpid()}.tmp"
+            tmp.write_text(repr(psutil.Process().create_time()), encoding="utf-8")
+            os.replace(tmp, me)  # whole or absent: a reader never sees a half-written start time
+        else:
+            me.unlink(missing_ok=True)
+    except (OSError, psutil.Error):
         pass
 
 
@@ -500,6 +533,24 @@ class Held:
             self.f = None
         finally:
             gate.close()
+            try:
+                Path(gate.name).unlink()  # this process's own gate: nobody can be under a holder that has let go
+            except OSError:
+                pass
+            # and what its jobs left beside that gate: their waiting lists and the stamp of their last render
+            Path(gate.name + ".rendered").unlink(missing_ok=True)
+            for kind in (".waiting.d", ".looks.d"):
+                shutil.rmtree(gate.name + kind, ignore_errors=True)
+
+
+def lock_busy(lock):
+    """Whether some process holds the lock file now (taking it without waiting fails)."""
+    try:
+        with open(lock, "a+b") as f:
+            _try_lock(f)
+            return False                     # free: closing the file lets it go again
+    except OSError:
+        return True
 
 
 def held_above(lock):
@@ -511,7 +562,9 @@ def held_above(lock):
         h = read_holder(lock)
         line = [q.pid for q in psutil.Process(os.getpid()).parents()]
         for pid, where in marks():
-            if Path(where) == here and h and h[0] == pid and pid in line:
+            if Path(where) == here and pid in line and (h[0] == pid if h else lock_busy(lock)):
+                # with no note (a disk too full to write it), the mark an ancestor left and the lock being held are enough:
+                # the job waited on its own parent until its time ran out
                 return pid
         return None
     except (ValueError, OSError, psutil.Error):

@@ -80,16 +80,27 @@ def test_measure_gives_no_voice_to_every_film_and_measures_again_once_it_can_hea
         class Done:
             returncode, stdout = 0, ""
 
+        import measure as measure_py
+        import see
+        now = {"measure": measure_py.VERSION, "see": see.VERSION}
+
         def measure(args, **k):
             ran.append(1)
-            (cached / "measures.json").write_text(json.dumps({"voice": "transcribed"}), encoding="utf-8")
+            (cached / "measures.json").write_text(json.dumps({"voice": "transcribed", "versions": now}), encoding="utf-8")
             return Done()
         for here, again in (("faster_whisper is not installed in this Python", False), (None, True)):
-            (cached / "measures.json").write_text(json.dumps(m), encoding="utf-8")
+            (cached / "measures.json").write_text(json.dumps({**m, "versions": now}), encoding="utf-8")
             ran.clear()
             with patch.object(lean, "transcriber", lambda: here), patch.object(lean, "run", measure):
                 got, _ = lean.measures_of(film, cache_root=Path(tmp) / "cache")
             assert bool(ran) == again and (got["voice"] == "transcribed") == again, (here, ran, got)
+        # broke: a cache made by an earlier measure.py (whose tempo read 240 for 120 BPM) was compared with new measures
+        for old in ({**now, "measure": now["measure"] - 1}, None):
+            (cached / "measures.json").write_text(json.dumps({**m, "versions": old}), encoding="utf-8")
+            ran.clear()
+            with patch.object(lean, "transcriber", lambda: "faster_whisper is not installed in this Python"), patch.object(lean, "run", measure):
+                got, _ = lean.measures_of(film, cache_root=Path(tmp) / "cache")
+            assert ran and got["versions"] == now, f"a measure made by other code ({old}) is made again: {ran} {got}"
 
 
 def test_false_hearings_and_sparse_words_are_no_voice():

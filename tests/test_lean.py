@@ -414,7 +414,8 @@ def test_every_command_ends_on_the_path_it_made():
         assert lines[-1] == str((Path(tmp) / "f").resolve()) and lines[-2].startswith("vd new:"), lines[-3:]
     # each command that makes something records it; main prints the last one
     src = (TOOLS / "lean.py").read_text(encoding="utf-8")
-    for cmd in ("cmd_new", "cmd_look", "cmd_sound", "cmd_render", "cmd_export", "cmd_measure", "cmd_pin", "cmd_pack", "cmd_profile", "cmd_scan"):
+    for cmd in ("cmd_new", "cmd_look", "cmd_sound", "cmd_render", "cmd_export", "cmd_measure", "cmd_pin", "cmd_pack", "cmd_profile", "cmd_scan",
+                "cmd_steal", "cmd_capture", "cmd_launch", "cmd_foley", "cmd_evolve", "cmd_playable", "cmd_audio", "cmd_bridge"):
         body = src.split(f"def {cmd}(", 1)[1].split("\ndef ", 1)[0]
         assert "made_it(" in body, f"{cmd} doesn't say what it made"
 
@@ -823,6 +824,33 @@ def test_a_re_export_of_a_current_picture_still_checks_the_room():
         assert checked[1] < checked[0], f"less room asked when nothing is drawn: {checked}"
 
 
+
+def test_a_picture_is_current_only_while_its_sources_are_what_it_was_drawn_from():
+    # broke: freshness compared the picture's mtime with the newest source left, so deleting a scene the film imported
+    # kept the old picture; and a vd render splice made the whole picture look new though the frames outside the
+    # stretch were drawn from older sources
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as tmp:
+        d, rendered, render = fake_film(tmp)
+        (d / "scene.tsx").write_text("// a scene main.tsx imports", encoding="utf-8")
+        out = Path(tmp) / "out" / "film"
+
+        def splice(args, **k):                          # heavy.py's ffmpeg splice, standing in: it writes the joined picture
+            (out / "picture.splice.mp4").write_bytes(b"spliced")
+        pictures = lambda: len([n for n, f in rendered if ".picture" in n])
+        with patch.object(lean, "OUTROOT", Path(tmp) / "out"), patch.object(lean, "raea_render", render),                 patch.object(lean, "must_preflight", lambda *a, **k: None), patch.object(lean, "mux", lambda *a, **k: None),                 patch.object(lean, "hand_in", lambda dest: (dest, [])), patch.object(lean, "scanned", lambda film, to: to),                 patch.object(lean, "build_sound", lambda d, s: Path(lean.outdir(d) / "sound.wav").write_bytes(b"w")),                 patch.object(lean, "run", splice), patch.object(lean, "join_report", lambda *a, **k: ""):
+            lean.cmd_export(Args(film=str(d)))
+            lean.cmd_export(Args(film=str(d)))
+            assert pictures() == 1, "an unchanged film's picture is reused"
+            (d / "scene.tsx").unlink()
+            lean.cmd_export(Args(film=str(d)))
+            assert pictures() == 2, "a deleted source makes the picture stale"
+            lean.cmd_render(Args(film=str(d), from_="0", to="0.5"))
+            lean.cmd_export(Args(film=str(d)))
+            assert pictures() == 3, "after a splice the next export draws the whole picture again"
+            lean.cmd_export(Args(film=str(d)))
+            assert pictures() == 3, "and after that it is current again"
+
 def test_export_copies_a_films_own_sound_on_and_scans_what_it_made():
     # a worked film masters its own sound (media/sound.wav, -15 LUFS) and its score lists no sounds: built from the
     # score, the export would have carried silence
@@ -918,6 +946,34 @@ def test_two_film_folders_of_one_name_never_share_a_picture():
         assert "another film folder called film" in said.getvalue() and str(first.resolve()) in said.getvalue(), said.getvalue()
         assert (Path(tmp) / "out" / "film" / lean.OWNER).read_text(encoding="utf-8").strip() == str(second.resolve())
 
+
+
+def test_a_folder_taking_over_a_name_does_not_inherit_the_other_films_latest_cut_or_scan():
+    # broke: a second folder called `shared` took over ~/.vd/out/shared and its first failed export said "shared.mp4 is
+    # still cut 1": the other film's cut, its scan.txt and its evolve key were read as this folder's
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as tmp:
+        a, b = Path(tmp) / "one" / "shared", Path(tmp) / "two" / "shared"
+        a.mkdir(parents=True)
+        b.mkdir(parents=True)
+        with patch.object(lean, "OUTROOT", Path(tmp) / "out"):
+            o = lean.outdir(a)
+            (o / "cuts").mkdir()
+            for name, data in (("cuts/shared-cut1.mp4", b"cut1"), ("shared.mp4", b"cut1"), ("shared-share.mp4", b"s"),
+                               ("shared-sheet_000.jpg", b"j"), ("shared-sheet.jpg", b"one sheet"), ("scan.txt", b"SCAN of one"), ("sound.txt", b"sound of one"),
+                               ("bridge/cues.json", b"{}"), ("evolve-1-KEY.txt", b"key")):
+                (o / name).parent.mkdir(parents=True, exist_ok=True)
+                (o / name).write_bytes(data)
+            assert lean.outdir(b) == o
+            left = sorted(p.relative_to(o).as_posix() for p in o.rglob("*") if p.is_file() and p.name not in (lean.OWNER, "exporting.lock"))
+            assert left == ["cuts/shared-cut1.mp4", "earlier-folder/1/evolve-1-KEY.txt"], left
+            # a third folder taking the name over keeps both earlier keys (broke: the second replaced the first's)
+            (o / "evolve-1-KEY.txt").write_bytes(b"key two")
+            c = Path(tmp) / "three" / "shared"
+            c.mkdir(parents=True)
+            lean.outdir(c)
+            assert (o / "earlier-folder" / "1" / "evolve-1-KEY.txt").read_bytes() == b"key"
+            assert (o / "earlier-folder" / "2" / "evolve-1-KEY.txt").read_bytes() == b"key two"
 
 def test_the_scans_count_line_says_when_the_sound_is_missing_or_off_and_an_unscanned_export_is_not_a_clean_exit():
     # a review's finding: a film with no sound, or far off the level, ended "0 to fix and 0 to check"; and an export

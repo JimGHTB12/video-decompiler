@@ -151,7 +151,17 @@ def outdir(d):
         # had already removed the picture and sound that export was about to join (a review's finding)
         try:
             with held(o, f"taking {o.name} over for {d}"):
-                for f in [*o.glob("*.picture.mp4"), o / "sound.wav", o / "sound-raw.wav"]:
+                # the other film's latest cut, its share copy, sheets and scan are copies or readings of what cuts/ keeps,
+                # and left here they read as this folder's (an export that failed said "NAME.mp4 is still cut 1" of the
+                # other film); its evolve keys are kept, moved aside, since nothing else holds them
+                # each takeover its own folder: a second takeover once replaced the first one's keys there
+                aside = next(o / "earlier-folder" / str(n) for n in range(1, 10000) if not (o / "earlier-folder" / str(n)).exists())
+                for f in [*o.glob("evolve-*-KEY.txt"), *o.glob("evolve-*-divergence.json")]:
+                    aside.mkdir(parents=True, exist_ok=True)
+                    os.replace(f, aside / f.name)
+                shutil.rmtree(o / "bridge", ignore_errors=True)   # the other film's cue list and timelines, bound to its export
+                for f in [*o.glob("*.picture.mp4"), o / "sound.wav", o / "sound-raw.wav", o / f"{d.name}.mp4", o / f"{d.name}-share.mp4",
+                          *o.glob(f"{d.name}-sheet*.jpg"), o / "scan.txt", o / "sound.txt"]:
                     try:
                         f.unlink(missing_ok=True)
                     except OSError as e:
@@ -166,7 +176,8 @@ def outdir(d):
                              "and this folder's command would clear its picture and sound from under it. Wait for it to end, or give this folder another name. "
                              "Nothing was changed.") from None
         print(f"vd: {o} held the outputs of another film folder called {d.name} ({was}). It is this folder's now: the picture and sound kept there for "
-              "reuse were dropped, so none of the other film's is taken for this one's, and its cuts stay under cuts/, numbered on from. "
+              "reuse, its latest cut's copies and its scan were dropped, so none of the other film's is taken for this one's; its cuts stay under cuts/, "
+              "numbered on from, and its evolve keys are in earlier-folder/N/. "
               "Two films on one machine want two names.", file=sys.stderr, flush=True)
     return o
 
@@ -192,7 +203,7 @@ def usage_log(cmd, film, seconds, path=None):
         pass
 
 
-LEAN_ONLY = {"look", "export", "pack", "pin", "profile", "scan"}
+LEAN_ONLY = {"look", "export", "pack", "pin", "profile", "scan", "steal", "capture", "launch", "foley", "evolve", "playable", "audio", "bridge"}
 
 
 def claims(argv):
@@ -849,7 +860,7 @@ def cmd_sound(a):
         return verdict(said)
     if s is None:
         raise SystemExit("vd sound builds from score.json (vd new writes one); for a film begun by hand give its entry: vd sound ENTRY.tsx --composition ID")
-    if s.get("sound_file") and not s.get("voice"):
+    if s.get("sound_file") and not s.get("voice") and not s.get("music"):
         wav = own_sound(d, s)
         if a.onto:
             film = Path(a.onto).resolve()
@@ -880,6 +891,19 @@ def cmd_sound(a):
     return verdict(report)
 
 
+def music_beat(d, s):
+    """Stop when a mapped track's beat is not yet the film's: the picture reads its beat from kit/times.gen.ts, which
+    the film's sound.py writes from score.json's music, so a track mapped after sound.py last ran sits on another beat."""
+    fb = (s.get("music") or {}).get("fb")
+    if not (d / "sound.py").is_file():
+        return      # a starter keeps its scenes in seconds (score.json's beats), with no beat of its own to move
+    have = (gen_data(d).get("CLOCK") or {}).get("FB")
+    if fb and have != fb:
+        raise SystemExit(f"stopped: score.json's music is {s['music']['source']} at {fb} frames a beat, and kit/times.gen.ts still holds "
+                         f"{have}. The film's beat is its sound.py's: run it, so its picture and sound move onto the track's beat, "
+                         f"then this again:\n{run_sound_py(d)}")
+
+
 def build_sound(d, s):
     """Voice, stems and made sounds placed from score.json; a bed and Tone music ducked under the words; the mix
     brought to LUFS_AIM with its true peak at PEAK_BUILD; then the check, written to out/sound.txt and returned."""
@@ -893,7 +917,10 @@ def build_sound(d, s):
     if v:
         v = {"file": v} if isinstance(v, str) else v
         place(voice, read_audio(d / v["file"]), v.get("at", 0.0), v.get("gain", 0.0))
-    if s.get("sound_file"):
+    music = s.get("music")
+    if music:
+        music_beat(d, s)
+    if s.get("sound_file") and not (music and music.get("replace")):
         # a worked film's own mix (its sound.py's) under score.json's voice: the copy's own sound was carried as it was,
         # so a voice added by the pages' route was dropped without a word. Ducked under the words like any bed.
         place(under, read_audio(own_sound(d, s)), 0.0, s.get("sound_file_gain", 0.0))
@@ -907,6 +934,11 @@ def build_sound(d, s):
         if e.get("dur") and e.get("file"):
             x = x[: int(e["dur"] * SR)]
         place(hits, x, e["at"], e.get("gain", -6))
+    if music:
+        # an external track, fitted by vd audio --tempo-map to the film's beat and placed on it (score.json's music)
+        place(under, read_audio(d / music["file"], music.get("from", 0.0)), music.get("at", 0.0), music.get("gain", 0.0))
+        notes.append(f"music {music['source']} at {music['bpm']:g} BPM, fitted to {music['film_bpm']:g} BPM ({music['fb']} frames a beat), "
+                     + ("in place of this film's own mix" if music.get("replace") else "under this film's own mix"))
     for e in s.get("stems", []):            # whole tracks on the film's clock (a recorded effects track, a music file)
         place(under, read_audio(d / e["file"], e.get("from", 0.0)), e.get("at", 0.0), e.get("gain", 0.0))
     if s.get("bed"):
@@ -1207,6 +1239,13 @@ def cmd_render(a):
     # an encode of the whole picture: through heavy.py, which gives ffmpeg its turn in the queue at once and says what it waits for
     run([PY, "-X", "utf8", TOOLS / "heavy.py", "--stall", "180", "--", *splice_args(pic, part, tmp, f0, f1, total=total)], check=True)
     tmp.replace(pic)
+    note = picture_note(pic)
+    try:
+        seen = json.loads(note.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        seen = {}
+    # frames f0-f1 now come from today's sources and the rest from the last full draw: vd export draws it whole again
+    note.write_text(json.dumps({**seen, "spliced": seen.get("spliced", []) + [[f0, f1]]}), encoding="utf-8")
     w = split_wait(secs, line)
     print(f"rendered frames {f0}-{f1 - 1} ({(f1 - f0) / fps:.2f} s of film) in {secs:.1f} s" + (f" ({w[0]:.0f} s waiting in the queue, {w[1]:.0f} s rendering)" if w else "")
           + f"; spliced into {pic} in {time.monotonic() - t0:.1f} s")
@@ -1226,11 +1265,47 @@ def sources_newest(d):
     return max((p.stat().st_mtime for p in files), default=0)
 
 
+def source_files(d):
+    """{relative path: [mtime, size]} of every source of the film's picture (the files sources_newest reads)."""
+    files = [p for p in d.rglob("*") if p.is_file() and "out" not in p.relative_to(d).parts and p.name not in STUBS]
+    return {p.relative_to(d).as_posix(): [round(p.stat().st_mtime, 3), p.stat().st_size] for p in files}
+
+
+def picture_note(pic):
+    """Beside the cached picture: what it was drawn from ({"files": source_files at the draw}) and the stretches a
+    vd render spliced in since ({"spliced": [[f0, f1], ...]})."""
+    return pic.with_name(pic.name + ".sources.json")
+
+
+def picture_current(d, pic):
+    """(current, why not). The picture is current only when the film's sources are what it was drawn from, file for
+    file: a newest-mtime test kept a picture after a scene it imported was deleted (no file left was newer), and a
+    vd render splice made the whole picture look new though the frames outside the stretch came from older sources."""
+    if not pic.exists():
+        return False, "no picture yet"
+    note = picture_note(pic)
+    try:
+        seen = json.loads(note.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False, "no record of what the picture was drawn from"
+    if seen.get("spliced"):
+        return False, f"frames {', '.join(f'{a}-{b - 1}' for a, b in seen['spliced'])} were spliced in from newer sources than the rest"
+    now = source_files(d)
+    if seen.get("files") != now:
+        was = seen.get("files") or {}
+        gone, new = sorted(set(was) - set(now)), sorted(set(now) - set(was))
+        changed = sorted(f for f in set(was) & set(now) if was[f] != now[f])
+        bits = ([f"{', '.join(gone[:3])} removed"] if gone else []) + ([f"{', '.join(new[:3])} added"] if new else []) +                ([f"{', '.join(changed[:3])} changed"] if changed else [])
+        return False, "; ".join(bits) or "its sources changed"
+    return True, ""
+
+
 def sound_inputs(d, s):
     """score.json and every file the sound is built from (voice, stems, sounds, bed, Tone music): an edit to any of them
     makes the built sound stale."""
     v = s.get("voice")
-    named = [v if isinstance(v, str) else (v or {}).get("file"), s.get("tone"), (s.get("bed") or {}).get("file"), s.get("sound_file")]
+    named = [v if isinstance(v, str) else (v or {}).get("file"), s.get("tone"), (s.get("bed") or {}).get("file"), s.get("sound_file"),
+             (s.get("music") or {}).get("file")]
     named += [e.get("file") for e in s.get("stems", []) + s.get("sounds", [])]
     return [d / "score.json"] + [d / f for f in named if f and (d / f).exists()]
 
@@ -1353,6 +1428,12 @@ def cmd_export(a):
         if not done.get("cut"):
             for f in [cut.with_name(cut.stem + ".part.mp4"), *hand_in_files(cut)]:
                 f.unlink(missing_ok=True)
+        if done.get("cut"):
+            # the cut was filed and stays: a step after it failed, and an agent told no cut was made would export again
+            # and file the same film as the next cut
+            print(f"export failed after cut {n} was made: cuts{os.sep}{cut.name} is kept, and the step after it failed (see above)",
+                  file=sys.stderr)
+            raise
         before = cut_of(out, dest.stem)[0] - 1
         print(f"export failed: no cut {n} was made" + (f"; {dest.name} is still cut {before}, cuts{os.sep}{dest.stem}-cut{before}.mp4" if before and dest.exists() else ""),
               file=sys.stderr)
@@ -1371,7 +1452,11 @@ def _export(a, cut=None, done=None):
     said = []
     if s and s.get("sound_file") and not a.sound:
         own_sound(d, s)                     # a stale or missing own mix stops the export before the picture's render
-    draw = a.again or not pic.exists() or pic.stat().st_mtime < sources_newest(d)
+    if s and s.get("music"):            # with --sound too: the picture is timed on the beat as much as the sound is
+        music_beat(d, s)                    # so does a mapped track whose beat sound.py has not yet made the film's
+    current, stale_why = picture_current(d, pic)
+    draw = a.again or not current
+    drawn_from = source_files(d) if draw else None     # the sources as the draw begins: an edit during it is caught next time
     total, fps = export_frames(s, entry, comp) if draw else (None, (s or {}).get("fps"))
     # every export writes the cut, its share copy and (a link or a copy) the latest; drawing the picture needs the
     # picture's room and raea's own too
@@ -1411,11 +1496,14 @@ def _export(a, cut=None, done=None):
         else:
             said.append(f"picture rendered once in {secs:.1f} s{waited}")
         part.replace(pic)
+        picture_note(pic).write_text(json.dumps({"files": drawn_from}), encoding="utf-8")
+        if stale_why and not a.again and stale_why != "no picture yet":
+            said.append(f"(drawn again: {stale_why})")
     else:
         said.append("picture is current, not rendered again")
     if a.sound:
         wav = Path(a.sound).resolve()
-    elif s and s.get("sound_file") and not s.get("voice"):
+    elif s and s.get("sound_file") and not s.get("voice") and not s.get("music"):
         wav = own_sound(d, s)
         said.append(f"sound is {s['sound_file']}, as it is")
     elif s:
@@ -1525,6 +1613,13 @@ def measures_of(film, cache_root=None, no_voice=False):
     if (out / "measures.json").exists() and not_transcribed(json.loads((out / "measures.json").read_text(encoding="utf-8"))) and transcriber() is None:
         print(f"{film.name} was measured when no transcriber was here; measuring it again for its words", flush=True)
         (out / "measures.json").unlink()
+    if (out / "measures.json").exists():
+        import measure
+        import see
+        if json.loads((out / "measures.json").read_text(encoding="utf-8")).get("versions") != {"measure": measure.VERSION, "see": see.VERSION}:
+            # measured by other code (an older tempo once read 240 for 120 BPM): comparisons never mix two ways of measuring
+            print(f"{film.name} was measured by an earlier version of the tools; measuring it again", flush=True)
+            (out / "measures.json").unlink()
     if not (out / "measures.json").exists():
         out.mkdir(parents=True, exist_ok=True)
         # not behind films: measure_film waits in the queue only to load the transcriber, and says so at once; output streams
@@ -1847,6 +1942,208 @@ def cmd_profile(a):
     return p.returncode
 
 
+# ---------------------------------------------------------------- steal, capture, launch, foley, evolve, playable
+
+def cmd_steal(a):
+    """vd steal (not proven): a reference's moves fitted to springs and curves, and its held colours, into dna.json,
+    kit/dna.gen.ts and REFERENCE.md."""
+    import steal
+    d = Path(a.out).resolve() if getattr(a, "out", None) else film_dir(a.film, required=False)
+    out_dir, _dna = steal.compile_dna_cartridge(
+        ref_video=Path(a.ref),
+        out_dir=d,
+        repo_dir=Path(a.for_repo) if getattr(a, "for_repo", None) else None,
+        k=getattr(a, "k", 5),
+        like=getattr(a, "like", None),
+    )
+    return made_it(out_dir)
+
+
+def cmd_capture(a):
+    """vd capture (not proven): a repository's counts, or a command's real output lines and times, into
+    kit/puppet.gen.ts, and kit/PuppetPlane.tsx to show them."""
+    import puppet
+    d = film_dir(a.film)
+    repo_dir = Path(a.repo).resolve() if getattr(a, "repo", None) else d
+    repo_data = puppet.analyze_codebase(repo_dir)
+    if getattr(a, "cmd_str", None):
+        term_data = puppet.capture_command(a.cmd_str, repo_dir, timeout=a.timeout)
+    else:
+        term_data = puppet.counts_record(repo_data)
+    gen_path, _comp_path = puppet.write_puppet_files(d, repo_data, term_data, cue=getattr(a, "cue", "hit") or "hit")
+    return made_it(gen_path)
+
+
+def cmd_launch(a):
+    """vd launch (not proven): a copy of Stet with vd capture run into it, the counts in REPO-FACTS.md, and the plane
+    put in the film for four seconds from its NUMBERS cue."""
+    import puppet
+    out_dir, _repo_data = puppet.build_launch_film(
+        repo_dir=Path(a.repo or "."),
+        out_dir=Path(a.out) if getattr(a, "out", None) else None,
+        cmd=getattr(a, "cmd_str", None),
+        like=getattr(a, "like", None) or "stet",
+    )
+    return made_it(out_dir)
+
+
+def cmd_foley(a):
+    """vd foley (not proven): media/foley.wav, made by rule from camera moves and cues read from the film's code
+    (~/.vd/out/NAME/telemetry.gen.json); nothing is measured from the drawn picture."""
+    import foley
+    d = film_dir(a.film)
+    out_wav = Path(a.o).resolve() if getattr(a, "o", None) else None
+    wav_path, _tel_path, summary = foley.run_foley(d, out_wav=out_wav, mix_into_sound=getattr(a, "mix", False))
+    print(summary)
+    return made_it(wav_path)
+
+
+def cmd_evolve(a):
+    """vd evolve (not proven): four world sketches, one after each worked film, as a blind line-up
+    (tournament/A..D), or the chosen one copied into the film folder with --select."""
+    import evolve
+    d = Path(a.name).resolve() if getattr(a, "name", None) else film_dir(a.film, required=False)
+    if d is None:
+        raise SystemExit("give a film folder name (`vd evolve NAME`) or run inside a film folder")
+    if getattr(a, "select", None) or getattr(a, "readings", None):
+        evolve.select_winner(
+            root=d,
+            letter=getattr(a, "select", None),
+            against=Path(a.mutate) if getattr(a, "mutate", None) else None,
+            readings=Path(a.readings) if getattr(a, "readings", None) else None,
+            key_file=Path(a.key) if getattr(a, "key", None) else None,
+        )
+        return made_it(d)
+    if getattr(a, "mutate", None):
+        raise SystemExit("vd evolve --mutate goes with --select (or --readings): it fits the chosen sketch to a reference film")
+    tourn_dir, _key_path, _brief_path, _mapping = evolve.build_tournament(
+        name=str(d),
+        brief=getattr(a, "brief", None),
+        repo_dir=Path(a.for_repo) if getattr(a, "for_repo", None) else None,
+        render=getattr(a, "render", False),
+        seed=getattr(a, "seed", None),
+    )
+    return made_it(tourn_dir)
+
+
+def cmd_playable(a):
+    """vd playable (not proven): a browser page that builds the film's code against a stand-in for raea, for
+    scrubbing, in ~/.vd/out/NAME/playable/index.html. It is not the film."""
+    import playable
+    d, entry, _s = where(a)
+    out = Path(a.o).resolve() if getattr(a, "o", None) else outdir(d) / "playable"
+    index_html, _bundle_js = playable.build_playable(d, entry=entry, out_dir=out)
+    return made_it(index_html)
+
+
+def cmd_audio(a):
+    """vd audio (not proven), from legible-film: clean a recorded voice (voice_clean.py), make a music track the film's
+    beat (tempo_map.py: score.json's music, which the film's sound.py and the mix read), or draw a track's sound (listen.py)."""
+    import listen
+    import tempfile
+    import tempo_map
+    import voice_clean
+    # cleaning a voice and mapping a track write into a film folder, so they need one; only the sheet can stand alone
+    d = film_dir(a.film, required=getattr(a, "clean_voice", False) or getattr(a, "tempo_map", False))
+    src = Path(a.track).resolve()
+    o = getattr(a, "o", None)
+    sheet = getattr(a, "sheet", False) or (not getattr(a, "clean_voice", False) and not getattr(a, "tempo_map", False))
+    if o and getattr(a, "clean_voice", False) and sheet:
+        # one -o, two outputs: the cleaned voice was written to custom.png and the sheet over it, and score.json named the picture
+        raise SystemExit("vd audio: -o names one file, and --clean-voice and --sheet each make one; run them apart")
+    if o and sheet and not getattr(a, "clean_voice", False) and not str(o).lower().endswith(".png"):
+        raise SystemExit(f"vd audio --sheet: -o {o} is not a .png, and the sheet is a picture")
+    if not src.is_file():
+        raise SystemExit(f"no such audio file: {src}")
+    last_made = src
+    if getattr(a, "clean_voice", False):
+        (d / "media").mkdir(parents=True, exist_ok=True)
+        cleaned = Path(a.o).resolve() if getattr(a, "o", None) else (d / "media" / f"{src.stem}-clean.wav")
+        if cleaned == src:
+            raise SystemExit("vd audio --clean-voice: -o names the take itself; give the cleaned voice a new name")
+        # Nothing the command writes may be the take or the voice the film uses: the cleanup is made in a file of its own
+        # beside the output, and a refused one goes to the first -partial name that is neither.
+        voice = score_of(d).get("voice") if (d / "score.json").is_file() else None
+        # the voice is a path, or {"file": path, "at": ..., "gain": ...} (TECHNIQUES.md, "A recorded voice"): both are the film's
+        voice = voice.get("file") if isinstance(voice, dict) else voice
+        voice = d / voice if isinstance(voice, str) and voice else None
+        keep = {src, voice.resolve() if voice else None}
+        partial = next(c for c in (cleaned.with_name(f"{cleaned.stem}-partial{'' if n == 1 else f'-{n}'}.wav") for n in range(1, 1000))
+                       if c.resolve() not in keep)
+        cleaned.parent.mkdir(parents=True, exist_ok=True)
+        fd, fresh = tempfile.mkstemp(prefix=f".{cleaned.stem}-", suffix=".wav", dir=cleaned.parent)
+        os.close(fd)
+        fresh = Path(fresh)
+        try:
+            rep = voice_clean.clean_voice(src, fresh)
+        except BaseException as e:  # a refusal to read, a failed ffmpeg step or a stop: this run's own file goes with it
+            fresh.unlink(missing_ok=True)
+            if isinstance(e, ValueError):
+                raise SystemExit(f"vd audio --clean-voice: {e}")
+            raise
+        if rep["refused"]:
+            os.replace(fresh, partial)
+            print(f"voice_clean: {rep['refused']} (noise floor {rep['noise_floor_used_dbfs']} dBFS). The steps before it are in "
+                  f"{partial.name}; {cleaned.name} and score.json's voice are unchanged. Listen before using it.")
+            cleaned = partial
+        else:
+            os.replace(fresh, cleaned)
+            print(f"voice_clean: every step applied (noise floor {rep['noise_floor_used_dbfs']} dBFS) -> {cleaned}")
+        if not rep["refused"] and (d / "score.json").is_file():
+            s = score_of(d)
+            new = cleaned.relative_to(d).as_posix() if cleaned.is_relative_to(d) else str(cleaned)
+            # a voice named as {"file", "at", "gain"} keeps where it starts and its level: only its file changes
+            s["voice"] = {**s["voice"], "file": new} if isinstance(s.get("voice"), dict) else new
+            (d / "score.json").write_text(json.dumps(s, indent=1) + "\n", encoding="utf-8")
+        last_made = cleaned
+    if getattr(a, "tempo_map", False):
+        try:
+            res, gen_path = tempo_map.compile_into_film(d, src, bpm=getattr(a, "bpm", None), drop_at_beat=getattr(a, "drop_at_beat", None),
+                                                        replace=getattr(a, "replace_own_mix", False))
+        except ValueError as e:
+            raise SystemExit(f"vd audio --tempo-map: {e}")
+        m = score_of(d)["music"]
+        if (d / "sound.py").is_file():
+            print(f"tempo_map: {res['bpm']:.2f} BPM, fitted to {m['film_bpm']:g} BPM ({m['fb']} frames a beat, stretched x{m['stretch']:.4f}) "
+                  f"-> {m['file']} and score.json's music{('; ' + m['octave']) if m.get('octave') else ''}; its beats sit {m['off_grid_ms']['median']:g} ms from the grid at the median, 90% within "
+                  f"{m['off_grid_ms']['p90']:g} ms (listen: a track whose tempo wanders will not hold one beat). Now run the film's sound.py, so its beats, its picture and its sound move "
+                  f"onto this tempo; then vd sound or vd export lays the track {'in place of' if m['replace'] else 'under'} the film's own mix:\n"
+                  f"{run_sound_py(d)}")
+        else:
+            print(f"tempo_map: {res['bpm']:.2f} BPM, fitted to {m['film_bpm']:g} BPM -> {m['file']} and score.json's music; vd sound and vd export "
+                  f"lay it {'in place of' if m['replace'] else 'under'} the rest. This film has no sound.py: its scenes are in seconds "
+                  f"(score.json's beats), so put their edges on the track's beats, every {m['fb'] / int(score_of(d).get('fps') or 30):.4f} s "
+                  f"from its first beat at {m['first_beat_s']:g} s.")
+        last_made = gen_path
+    if getattr(a, "sheet", False) or (not getattr(a, "clean_voice", False) and not getattr(a, "tempo_map", False)):
+        # outside a film folder the sheet goes beside the track (it had made an output folder named after the folder run in)
+        out_png = Path(o).resolve() if o else (outdir(d) / "listen-sheet.png" if d else src.with_name(f"{src.stem}-sheet.png"))
+        cues = (gen_data(d).get("CUES") or []) if d else []
+        heard = last_made if getattr(a, "clean_voice", False) and last_made.suffix.lower() == ".wav" else src   # the cleaned voice, when there is one
+        prof = listen.measure(heard)
+        sh = listen.sheet(heard, out_png, cues_list=cues)
+        m = prof["measurements"]
+        print(f"listen: {m['integrated_lufs']} LUFS, {m['true_peak_dbtp']} dBTP, width {m['side_to_mid_db']} dB, corr {m['correlation']}; sheet -> {sh['png']}")
+        last_made = Path(sh["png"])
+    return made_it(last_made)
+
+
+def cmd_bridge(a):
+    """vd bridge (not proven): cues.json bound to the exported file, picture-timing.json, a Final Cut Pro 7 XML
+    file and an OpenTimelineIO file."""
+    import bridge
+    d = film_dir(a.film)
+    out = Path(a.o).resolve() if getattr(a, "o", None) else (outdir(d) / "bridge")
+    res = bridge.export_bridge(
+        film_dir=d,
+        video_path=Path(a.video) if getattr(a, "video", None) else None,
+        out_dir=out,
+        host_in_s=float(getattr(a, "host_in", 0.0) or 0.0),
+    )
+    print(f"bridge bundle in {res['out_dir']}: {res['cues_json'].name}, {res['timeline_xml'].name}, {res['timeline_otio'].name}")
+    return made_it(res["timeline_xml"])
+
+
 # ---------------------------------------------------------------- entry
 
 def home(argv):
@@ -1858,6 +2155,7 @@ def home(argv):
 def main(argv=None):
     argv = home(list(sys.argv[1:] if argv is None else argv))
     ap = argparse.ArgumentParser(prog="vd", description=__doc__.split("\n\n")[0], formatter_class=argparse.RawDescriptionHelpFormatter)
+    NP = 'Not proven on a film (SKILL.md, "Newer commands"). '  # the newer commands' help says so where an agent reads it
     sub = ap.add_subparsers(dest="cmd", required=True)
     films = worked_films()
     s = sub.add_parser("new", help="a film folder that starts from a working film", formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1899,7 +2197,8 @@ def main(argv=None):
                                    "the last line printed is the film's path.")
     s.add_argument("entry", nargs="?"); s.add_argument("--composition"); s.add_argument("--sound")
     s.add_argument("-o", help=f"where the film goes (default {OUTROOT}{os.sep}NAME{os.sep}NAME.mp4)")
-    s.add_argument("--again", action="store_true", help="render the picture even if it is current"); s.set_defaults(fn=cmd_export)
+    s.add_argument("--again", action="store_true", help="render the picture even if it is current")
+    s.set_defaults(fn=cmd_export)
     s = sub.add_parser("pack", help="a blind line-up of up to four films, and ours alone, for readers",
                        description="Needs our film; --against adds a film to the line-up, up to three times (a reference, a known-good film, an earlier cut: "
                                    "vd export keeps each as ~/.vd/out/NAME/cuts/NAME-cutN.mp4). "
@@ -1936,6 +2235,50 @@ def main(argv=None):
     s.add_argument("--transcript", action="append")
     s.add_argument("--since", help="only the session from this UTC time (ISO), for a film made inside a longer session")
     s.add_argument("--until", help="only the session up to this UTC time (ISO)"); s.set_defaults(fn=cmd_profile)
+    s = sub.add_parser("steal", help="not proven: a reference's fitted moves and colours",
+                       description=NP + "Fits each move the reference makes to a spring (how fast, how damped) and a curve, and takes its held colours, into dna.json, kit/dna.gen.ts and a REFERENCE.md to finish by TAKE-APART.md. A move with no usable profile is marked unfitted. It pins no targets: run vd pin REF as well, since vd measure reads pin's numbers.")
+    s.add_argument("ref", metavar="REF.mp4"); s.add_argument("--for", dest="for_repo", metavar="REPO", help="also record this repository's counts in dna.json (nothing reads them yet)")
+    s.add_argument("-o", "--out", dest="out", help="destination film folder"); s.add_argument("--k", type=int, default=5)
+    s.add_argument("--like", choices=("plusone", "stet", "onoma", "linden"), help="the worked film to copy when steal makes a new film folder (plusone, stet, onoma, linden): chosen, never guessed"); s.set_defaults(fn=cmd_steal)
+    s = sub.add_parser("capture", help="not proven: a repository's counts or a command's output, as a plane your film imports",
+                       description=NP + "Writes kit/puppet.gen.ts (the repository's counts, read by file and name patterns, so check them; or, with --cmd, the command's real output lines and times) and kit/PuppetPlane.tsx, a plane that shows them. Your film must import the plane itself. The command runs with no shell.")
+    s.add_argument("--cmd", dest="cmd_str", help="a program and its arguments, run with no shell, its output lines recorded with their times")
+    s.add_argument("--repo", help="repository folder to count (default: the film folder)")
+    s.add_argument("--timeout", type=float, default=30.0, help="seconds the command may run before it is stopped (default 30)")
+    s.add_argument("--cue", default="hit", help="cue name in kit/times.gen.ts to sync terminal lines to"); s.set_defaults(fn=cmd_capture)
+    s = sub.add_parser("launch", help="not proven: a copy of stet with a repository's counts on screen in it",
+                       description=NP + "Copies Stet and runs vd capture into it, writing the counts to REPO-FACTS.md for your board, and puts the plane in the film for four seconds from Stet's NUMBERS cue, on Stet's own paper: a start, to move where your board puts it.")
+    s.add_argument("repo", nargs="?", default=".", metavar="REPO"); s.add_argument("-o", "--out", dest="out")
+    s.add_argument("--like", choices=("plusone", "stet", "onoma", "linden"), help="override archetype")
+    s.add_argument("--cmd", dest="cmd_str", help="a program to run with no shell and record, as vd capture --cmd"); s.set_defaults(fn=cmd_launch)
+    s = sub.add_parser("foley", help="not proven: a sound track made by rule from the moves in the film's code",
+                       description=NP + "Reads camera moves and named cues from the film's code by pattern (sizes are guessed from cue names, not measured from the picture) into kit/telemetry.gen.json, and makes media/foley.wav from them. Nothing plays it unless you mix it. kit/telemetry.gen.json makes the next vd export draw the film again.")
+    s.add_argument("-o", help="output wav path (default media/foley.wav)")
+    s.add_argument("--mix", action="store_true", help="also add it into media/sound.wav, which sound.py owns: its next run drops it, and a second --mix adds it twice"); s.set_defaults(fn=cmd_foley)
+    s = sub.add_parser("evolve", help="not proven: four world sketches as a blind line-up",
+                       description=NP + "Packs four sketches, one after each worked film, as a blind line-up (tournament/A..D, its key in evolve-N-KEY.txt). Without --render each sketch is a fixed drawing per worked film with your subject's name on it; with it, the worked films are drawn untouched. Letters are dealt at random (the key file records them); --seed fixes them for a test. The person picks the world (EYES.md, Readers).")
+    s.add_argument("name", nargs="?", help="film folder name"); s.add_argument("--for", dest="for_repo", metavar="REPO", help="put this repository's counts on each sketch's board")
+    s.add_argument("--render", action="store_true", help="draw each worked film's three moments with vd look instead of the fixed drawings")
+    s.add_argument("--brief", help="the subject, in a line, written on each sketch's board (default: the repository's name or the folder's)")
+    s.add_argument("--seed", type=int, default=None); s.add_argument("--select", choices=("A", "B", "C", "D"), help="make the film folder that sketch's film (what was in it moves to ~/.vd/out/NAME/before-select-N); refused if the sketch changed since it was read")
+    s.add_argument("--readings", help="sum the readers' ranks in READINGS.md and promote the top sketch; readers rank sparse sketches higher, so prefer --select with the person's pick")
+    s.add_argument("--key", help="explicit evolve-N-KEY.txt path"); s.add_argument("--mutate", help="nearest reference MP4 to pin/steal into the winning candidate"); s.set_defaults(fn=cmd_evolve)
+    s = sub.add_parser("playable", help="not proven: a browser page that imitates the film, for scrubbing",
+                       description=NP + "Builds the film's code against a small stand-in for raea into ~/.vd/out/NAME/playable/index.html, scrubbed with the wheel. It is not the film: raea does not draw it, nothing compares its frames with the export, and parts of the kit (Freeze in kit/lib/finish.tsx, 3D) do not build. Needs esbuild or bun.")
+    s.add_argument("entry", nargs="?"); s.add_argument("-o", help="output directory (default ~/.vd/out/NAME/playable)"); s.set_defaults(fn=cmd_playable)
+    s = sub.add_parser("audio", help="not proven: clean a voice, make a music track the film's beat, or draw a track's sound",
+                       description=NP + "From legible-film. --clean-voice: five steps, each refused when it costs the speech more than 3 dB; a refusal keeps the steps before it in NAME-clean-partial.wav and leaves the film's voice as it was. --tempo-map: makes the track the film's beat: score.json's music holds its tempo and the nearest whole frames a beat, and media/NAME-fitted.wav the track stretched (at most 3%) and placed so its first beat, or its drop with --drop-at-beat, falls on a beat; run the film's sound.py next, which takes the beat from it, and the mix lays the track under the film's own (or in its place, --replace-own-mix). A track with no steady beat or needing more stretch is refused; how far its beats sit from the grid is said, since a drifting track cannot be told from ordinary music by these measures. --sheet: the track's sound drawn as one picture.")
+    s.add_argument("track", metavar="TRACK.wav"); s.add_argument("--clean-voice", action="store_true", help="five-step dialogue cleanup into media/")
+    s.add_argument("--tempo-map", action="store_true", help="make the track the film's beat (then run the film's sound.py)")
+    s.add_argument("--sheet", action="store_true", help="draw the track's sound, its onsets and the film's cues as one picture")
+    s.add_argument("--bpm", type=float, help="narrow BPM prior for --tempo-map"); s.add_argument("--drop-at-beat", type=int, help="place the track so its loudest drop falls on this film beat")
+    s.add_argument("--replace-own-mix", action="store_true", help="with --tempo-map: the track in place of the film's own mix, not under it")
+    s.add_argument("-o", help="output path"); s.set_defaults(fn=cmd_audio)
+    s = sub.add_parser("bridge", help="not proven: the export's cuts for an editor or legible-film",
+                       description=NP + "Writes cues.json (the shape legible-film reads, bound by hash to the exported file), picture-timing.json, a Final Cut Pro 7 XML file and an OpenTimelineIO file. Both place the picture and the sound the file has alike, --host-in a gap before them. No editing program has opened them: check them in the program.")
+    s.add_argument("--video", help="the exported film (default ~/.vd/out/NAME/NAME.mp4); refused when missing")
+    s.add_argument("--host-in", type=float, default=0.0, help="host timeline start offset in seconds")
+    s.add_argument("-o", help="output directory (default ~/.vd/out/NAME/bridge)"); s.set_defaults(fn=cmd_bridge)
     for p in sub.choices.values():
         p.add_argument("--film", help="the film folder (default: the nearest folder at or above here with score.json)")
     a = ap.parse_args(argv)

@@ -5,9 +5,10 @@
   new NAME --kind KIND                a film folder that starts from a working page film (explainer, launch, vertical, app)
   new NAME --like FILM                a copy of a whole worked film from library/films (`vd new --help` lists them)
   look, sound, render, export, scan, pack, measure, pin, profile   the film's commands (tools/lean.py; `vd COMMAND --help`)
+  steal, capture, launch, foley, evolve, playable, audio, bridge    newer commands, not proven on a film (SKILL.md)
 
 Every command leaves one line in ~/.vd/usage.log. What a command renders goes to ~/.vd/out/NAME, outside the film, and reader
-packs to ~/.vd/reads; `new`, `pin` and a film's own sound.py write in the film folder. Nothing is sent anywhere.
+packs to ~/.vd/reads; `new`, `pin`, `steal`, `capture`, `launch`, `foley`, `evolve`, `audio` and a film's own sound.py write in the film folder. Nothing is sent anywhere.
 """
 import argparse
 import importlib.util
@@ -82,6 +83,33 @@ def ffmpeg_version():
     return (int(m.group(1)) if m else None), line
 
 
+def ffmpeg_filters():
+    """The names of the audio and video filters this ffmpeg was built with, or None when it can't say."""
+    try:
+        out = subprocess.run(["ffmpeg", "-hide_banner", "-filters"], capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", timeout=30, creationflags=0x08000000 if os.name == "nt" else 0).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    # each filter is a line of flags, its name, its pads and what it does: " T.C afftdn  A->A  Denoise audio samples ..."
+    return {m.group(1) for m in re.finditer(r"^\s*[TSC.|]{2,4}\s+(\w+)\s+\S+->\S+", out, re.M)} or None
+
+
+def optional_tools():
+    """What the commands that only some films use need, said as optional: the machine is ready without them."""
+    import playable
+    import voice_clean
+    found = playable.find_esbuild() or playable.find_bun()
+    print(f"  ok   bundler (optional): {found}, for vd playable" if found else
+          "  --   bundler (optional, not here): only vd playable needs esbuild or bun, to build the film for a browser. "
+          "To add it: install bun from https://bun.sh (raea's own installer may already have put esbuild in ~/.raea/bin)")
+    have = ffmpeg_filters()
+    lack = None if have is None else [f for f in voice_clean.FILTERS if f not in have]
+    print("  ?    ffmpeg's audio filters for vd audio --clean-voice: couldn't read `ffmpeg -filters`" if lack is None else
+          f"  ok   ffmpeg's audio filters for vd audio --clean-voice ({', '.join(voice_clean.FILTERS)})" if not lack else
+          f"  --   ffmpeg's audio filters (optional): this ffmpeg lacks {', '.join(lack)}, which vd audio --clean-voice needs; "
+          f"the other commands do not. A full build of ffmpeg has them: {ffmpeg_fix()}")
+
+
 def doctor(a):
     import platform
     print(f"vd doctor on {platform.system()} {platform.release()} ({platform.machine()}); if anything below says MISS or FAILED, paste this whole report to whoever gave you the skill")
@@ -128,6 +156,7 @@ def doctor(a):
         for fix, names in fixes.items():
             print(f"  {', '.join(names)}: {fix}")
         raise SystemExit(1)
+    optional_tools()
     if not a.full:
         print(f"Ready. This also makes a film and looks at it:  {cmdline(sys.executable, TOOLS / 'vd.py', 'doctor', '--full')}")
         return
@@ -156,32 +185,45 @@ def doctor(a):
     print(f"Made a starter film and a copy of a worked film (plusone), built its sound and looked at both. Ready. The looks are in {lean.OUTROOT / 'doctor-starter'} and {lean.OUTROOT / 'doctor-plusone'}.")
 
 
-def main():
+def _run_lean(argv):
+    import lean
+    return lean.main(argv)
+
+
+def main(argv=None):
+    t0 = time.monotonic()
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] not in ("doctor", "-h", "--help"):
+        return _run_lean(argv)
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], epilog=__doc__.split("\n\n", 1)[1], formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = ap.add_subparsers(dest="cmd", required=True, metavar="COMMAND")
+    sub = ap.add_subparsers(dest="cmd", metavar="COMMAND")
     s = sub.add_parser("doctor", help="is this machine ready, and how to fix it if not")
     s.add_argument("--full", action="store_true", help="also make a film and look at it (one short render)")
     s.set_defaults(fn=doctor)
     for name, what in (("new", "a film folder that starts from a working film"), ("look", "many moments as one picture"), ("sound", "the sound with no picture"),
                        ("render", "render seconds A..B only"), ("export", "the finished film, scanned"), ("scan", "pops, holds and level of a finished film"),
                        ("pack", "a blind side-by-side pack for readers"), ("measure", "the gap table"), ("pin", "a reference's numbers into score.json"),
-                       ("profile", "minutes by class for the session")):
-        sub.add_parser(name, help=what + " (vd " + name + " --help)", add_help=False)
-    a = ap.parse_args()
-    a.fn(a)
-
-
-if __name__ == "__main__":
-    import utf8  # noqa: F401
-    t0 = time.monotonic()
-    argv = sys.argv[1:]
-    if argv and argv[0] not in ("doctor", "-h", "--help"):
-        import lean  # the film's commands live there; everything but doctor goes to it
-        sys.exit(lean.main(argv))
+                       ("profile", "minutes by class for the session"), ("steal", "not proven: a reference's fitted moves and colours"),
+                       ("capture", "not proven: a repository's counts or a command's output, as a plane"), ("launch", "not proven: a copy of stet with a repository's counts beside it"),
+                       ("foley", "not proven: a sound track made by rule from the film's code"), ("evolve", "not proven: four world sketches as a blind line-up"),
+                       ("playable", "not proven: a browser page that imitates the film"), ("audio", "not proven: clean a voice, measure a track, draw its sound"),
+                       ("bridge", "not proven: the export's cuts for an editor or legible-film")):
+        p = sub.add_parser(name, help=what + " (vd " + name + " --help)", add_help=False)
+        p.set_defaults(fn=lambda _a, _argv=argv: _run_lean(_argv))
+    if not argv:
+        ap.print_help()
+        return 0
     code = 1
     try:
-        main()
-        code = 0
+        a = ap.parse_args(argv)
+        fn = getattr(a, "fn", None)
+        if fn is None:
+            ap.print_help()
+            code = 0
+            return 0
+        r = fn(a)
+        code = r if isinstance(r, int) else 0
+        return code
     except SystemExit as e:
         code = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
         raise
@@ -191,3 +233,8 @@ if __name__ == "__main__":
             lean.usage_log(f"{argv[0] if argv else '-'}{'' if code == 0 else ' (failed)'}", Path.cwd(), time.monotonic() - t0)
         except Exception:  # on a bare Python lean's imports are all standard, but never let the log break doctor
             pass
+
+
+if __name__ == "__main__":
+    import utf8  # noqa: F401
+    sys.exit(main())

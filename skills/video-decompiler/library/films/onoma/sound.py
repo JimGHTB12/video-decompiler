@@ -10,6 +10,7 @@ import json, pathlib, subprocess, wave
 import numpy as np
 
 SR, FPS, FB, BEATS = 48000, 60, 30, 58
+FB = int((json.loads(pathlib.Path("score.json").read_text(encoding="utf-8")).get("music") or {}).get("fb") or FB)   # a track mapped by vd audio --tempo-map sets the beat
 BEAT = FB / FPS
 N = int(BEATS * BEAT * SR) + SR
 
@@ -111,7 +112,8 @@ def typing(name, g=0.16, keys=None):
 SOUNDS = {"rain": rain(1.9), "thunder": thunder(), "step": step(), "clap": clap_echo(), "heart": heart(), "hush": hush()}
 
 # ---- the room: a breath of air and one low note under the six words, so the gaps between sounds are not dead. It stops for the hush.
-room = pad([38, 50, 57], 11.4, 0.5) + band(rng.standard_normal(int(11.4 * SR)), 300, 2500) * 0.012 * np.minimum(1, tt(11.4) / 0.5)
+ROOM = 22.8 * BEAT   # 11.4 s at the film's own beat: in beats, so a track mapped at another tempo keeps the room to the hush
+room = pad([38, 50, 57], ROOM, 0.5) + band(rng.standard_normal(int(ROOM * SR)), 300, 2500) * 0.012 * np.minimum(1, tt(ROOM) / 0.5)
 put(room, 0, 0.5)
 # ---- the six words, each heard as it lands
 typing("rain"); put(SOUNDS["rain"], T["RAIN"], 0.9)
@@ -133,7 +135,7 @@ def track(fn):
     x = np.zeros(BAR + SR); fn(x); return x[:BAR]        # one bar; tails are cut, the loop restarts them
 def at(x, beat, s, g=1.0):
     a = int(beat * BEAT * SR); n = min(len(s), len(x) - a); x[a:a + n] += s[:n] * g
-t_rain = track(lambda x: at(x, 0, rain(2.0) * (0.55 + 0.45 * np.abs(np.sin(2 * np.pi * 2 * tt(2.0)))), 0.7))    # rain, breathing on the half beats
+t_rain = track(lambda x: at(x, 0, rain(LOOP * BEAT) * (0.55 + 0.45 * np.abs(np.sin(2 * np.pi * (1 / BEAT) * tt(LOOP * BEAT)))), 0.7))    # rain, breathing on the half beats, a loop long
 t_step = track(lambda x: [at(x, b, step(), 1.0) for b in range(LOOP)])
 t_clap = track(lambda x: [at(x, b, clap(1.0), 0.8) or at(x, b + 0.5, band(clap(0.5), 300, 2000), 0.8) for b in (1, 3)])
 t_heart = track(lambda x: [at(x, b, heart(), 0.95) for b in (0, 2)])

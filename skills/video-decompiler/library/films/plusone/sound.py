@@ -7,6 +7,7 @@ import json, pathlib, subprocess, wave
 import numpy as np
 
 SR, FPS, FB, BEATS = 48000, 60, 32, 72
+FB = int((json.loads(pathlib.Path("score.json").read_text(encoding="utf-8")).get("music") or {}).get("fb") or FB)   # a track mapped by vd audio --tempo-map sets the beat
 BEAT = FB / FPS
 N = int(BEATS * BEAT * SR) + SR
 rng = np.random.default_rng(11)

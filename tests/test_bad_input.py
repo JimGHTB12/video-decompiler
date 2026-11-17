@@ -132,7 +132,7 @@ def test_a_length_from_packets_is_whole_or_refused():
     assert code == 0, f"and the whole one compares to its end: {out[-300:]}"
 
 
-TESTS = [test_a_window_or_rate_that_isnt_one_is_refused,
+TESTS = [test_a_window_or_rate_that_isnt_one_is_refused, test_keep_never_clears_a_folder_it_did_not_fill,
          test_a_still_or_a_missing_file_is_named, test_a_webm_with_no_length_in_its_header_is_read, test_a_length_from_packets_is_whole_or_refused]
 
 

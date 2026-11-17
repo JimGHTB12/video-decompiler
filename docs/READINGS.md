@@ -195,3 +195,214 @@ I accounted for the reduced tile sizes. I am not treating ordinary interface tex
 C, yes, in a comparison explicitly about motion craft. The grid collisions and duplicated Thursday label make it look insufficiently checked, and B exposes those weaknesses by handling a very similar product demonstration more cleanly.
 
 B has an obvious title-path error worth fixing, but I would not call the whole film embarrassing. A would not embarrass its maker; its main problem is failing to stop the RSVP demonstration soon enough.
+
+
+---
+
+# The 16 November line-up: Test 6, Test 5 and Plus One
+
+Read blind on 16 November 2026 by two readers from two families of model, using the same `vd pack` protocol and `EYES.md` brief word for word, with the letters dealt differently for each reader. Their words are unchanged; only their headings are set two levels lower.
+
+## Reader 1: Claude Opus 5.5
+
+In this reader's line-up, **A** was test 6, **B** was test 5 and **C** was Plus One.
+
+I've opened all 24 sheets. A and B both sell the same product, Larder, so I compared those two directly as well as against C.
+
+#### 1. Ranking (motion design craft, best first)
+
+**1. B — 2. C — 3. A**
+
+**B over C.** B gives every scene one focal point and keeps type readable. C keeps piling layers on until the picture stops reading.
+- B's headline system holds throughout: the typed "What's for dinner on [pill]?" (0–3.5s), "Seven dinners. One page." (6.5–7.0), "The list rewrites itself." (13.0–19.5). These are big serif lines with clear space around them.
+- B's handoffs keep you oriented in space. The pizza and its title shrink into the list scene (move-4, f745–f768). A small copy of the list pops off the card and flies right while the camera pans to the phone (move-5, f1185–f1207). "Sam's [phone] got it." is laid out as one sentence (move-5, f1208–f1225).
+- From 24s to 34s, C shows the counter, a card, about 24 avatars, +1 chips, comment bubbles and repeated firework bursts all at once (story 25.5–29.5).
+- During C's crossfade from 19 to 20 (move-5, f1920–f1923), both numbers sit on top of each other and the result is muddy.
+- C's fireworks streak across "in." and "20" (move-5, f1930–f1945).
+- C's art carousel (11.0–16.5) is a row of blurred side cards with ghost duplicates of "Mira's 30th" and very small credit lines.
+- B still has visible faults (see section 5), but they are short.
+
+**C over A.** C's transitions have reasons behind them and its story has a clear shape. A has framing and cursor mistakes that stay on screen for seconds.
+- C: the chat bubbles drain into blank placeholder pills (3.5s). They become a text field whose typed details get coloured underlines (5.0–6.0). The field turns into the card, which splits "Name it." around itself (6.5–7.5). After the Hiroshige print is chosen, fireworks come out of it (17.0–18.5). The camera then whips into Zoe's phone (move-2, f1340–f1349).
+- A: a slow camera push to "Send list" crops the title to "sh soup" at the left edge, and the crop holds from about 17.5s to 21.0s (move-3, f1049–f1084; story 17.5–20.5).
+- A: the cursor sits on top of button labels. "Send list" reads "Sen◎ list" (move-3, f1065–f1084) and "Send to Sam" reads "Send ◎ Sam" (19.5s).
+- A: the "Who's doing the shop?" pop-up first appears as empty placeholder bars (18.0s).
+- A: a tiny, crude document icon floats in the middle of the card (20.5s).
+- A: a frosted-glass dissolve drops into a blurred market photo (21.0–25.4). That breaks the film's visual style and puts low-contrast text over a busy image.
+- A is smooth from frame to frame. The problems are in framing and judgement, not in the motion itself.
+
+#### 2. What each one sells and what happens
+
+- **A:** Larder, a weekly dinner planner with a shopping list. "What's for dinner?" is typed and repeated for each day, and the questions are replaced by dishes in a full app view. Thursday's salmon is swapped for squash soup, the list strikes out and adds ingredients, it is sent to Sam, and Sam ticks items off on a phone over a market photo before the logo end card.
+- **B:** Larder again, with the same story told more cleanly. The week of plates fills in under day pills, Thursday's spaghetti with mussels becomes chicken and spinach pizza, and "The list rewrites itself." Sam is chosen, the list flies to Sam's phone ("Sam's got it."), Sam ticks items off, and the film recaps the week and ends on the Larder logo.
+- **C:** Plus One, an event invitation app. A chaotic group chat becomes one typed line that turns into an invite card ("Name it."), the card gets an art-print theme ("Dress it.") and goes to 24 guests ("Send it."). Zoe taps "I'm in", the counter climbs to 20 with fireworks, a request to bring Theo is approved, and the film ends on the Plus One logo with "Invitations people answer."
+
+#### 3. Who made it
+
+- **A: skilled hobbyist**, low to moderate confidence. What pushes me there most is the "sh soup" crop held for roughly three seconds with the cursor parked on button labels. A paid motion designer would have reframed that shot.
+- **B: freelance motion designer**, moderate confidence. It has a consistent type and colour system and well-choreographed handoffs. The title running across the pizza photo (f749–f757) is the kind of mistake a studio's review would catch, so I didn't pick professional studio.
+- **C: freelance motion designer**, low confidence. The ambition and small details go beyond hobby work, for example the progress rings filling on each avatar (move-2) and the underlined details in the text field. The density, and a counter "1" that reads as a capital "I", suggest no art director edited it down.
+
+#### 4. Strongest moment and weakest stretch
+
+- **A**
+  - Strongest, 7.5–9.0s: the Thursday row grows into a detail card, and leader lines draw from the plate to Dill, Courgettes, Salmon fillets and Spinach.
+  - Weakest, 17.5–21.0s: the cropped title, the cursor over labels, the empty pop-up, then the stray document icon.
+- **B**
+  - Strongest, 19.9–20.5s: the list copy flies off the card, the phone slides in, and "Sam's" and "got it." fade in on either side of it.
+  - Weakest, 22.0–26.0s: four seconds of recap that repeats the opening. In it, labels change after their images (see section 5) and nothing new is said.
+- **C**
+  - Strongest, 4.5–7.5s: "Name it." plus the underlined typed line, which turns into the card.
+  - Weakest, 11.0–16.5s: about 5.5 seconds of slow carousel drift past blurred cards with ghost titles and credit lines too small to read. The move-1 sheet (f758–f817) is supposedly one of the busiest seconds, and almost nothing changes in it except a slow slide and the cursor.
+
+#### 5. Places where the motion looks wrong frame by frame
+
+**A**
+- Story 0.5–1.0s: the typed headline holds for about 0.5s with only the cursor blinking. At 1.5s it is already a small row in a list. Whatever happens in between is outside the sheets, so I can't say whether that change is smooth or a jump.
+- Story 3.5s: the WED row still shows a faded "What's for dinner?" while it changes to a dish. This is mid-transition and looks acceptable.
+- Story 4.5–6.5s and 13.0–17.0s: the whole app is shown so small that the ingredient list and quantities are fine print. On the 400 px tile that text is about 2–3 px tall, roughly 10–14 px if the film is 1920 wide. It is too small to read in motion.
+- Story 11.5s: the alternatives row has a gap where Squash soup used to be. At 12.0s the middle thumbnail has no label.
+- Move-2, f787–f791: the "Larder" header is clipped by the top edge as the app slides down. The shopping-list column is cut by the right edge from f776 to f783.
+- Story 15.5–16.0s: the "Feta" and "Chilli flakes" tags fly across the list. At 16.0s the "Chilli flakes" tag straddles the card's bottom edge on top of the "Pumpkin seeds" row. At 17.0s "Chilli flakes" sits flush against the card's bottom edge.
+- Move-3, f1041–f1084, and story 17.5–20.5s: "Larder" and "This week" slide off the left edge, and the "Squash soup" title is cut to "quash soup", then "sh soup", for about three seconds.
+- Move-3, f1065–f1084: the cursor covers the "Send list" label. The frame barely changes for about 0.3s.
+- Story 18.0s: the pop-up shows empty grey placeholder bars.
+- Story 19.5s: the cursor covers "to" in "Send to Sam".
+- Story 20.5s: a tiny, low-detail document icon sits alone in the middle of the card.
+- Move-4, f1280–f1304: "Sent", "to" and "Sam." fade in word by word while the phone is still entering. The light serif over the busy produce photo is low contrast.
+- Story 22.0–25.0s: "17 items, on Sam's phone." in small white type over the photo is hard to read. The "x of 17" counter on the phone is tiny.
+- Move-5, f1514–f1521: the phone leaves to the right in about seven frames, which is abrupt next to its slower entrance. That is followed by about 0.1s of empty market photo (f1522–f1525).
+- Move-5, f1528–f1533: "Wh…" starts typing in dark text over the still-busy photo.
+- Story 30.5s: the "Larder" wordmark is half revealed, with "rder" as a ghost. This is a wipe and is acceptable.
+- Story 31.0–32.0s: the end card looks static for about 1s before the dish dots appear. I can't confirm this between the tiles.
+
+**B**
+- Story 2.5s and 3.0s: the "FRI" and "SAT" pills are white on white mid-transition and can't be read. The same happens with "TUE" at 25.0s.
+- Story 4.0s and move-1, f246–f255: the day pills pan over an empty canvas for about 0.15s before any plate appears. "THU 1" is cut by the right edge. This is part of a pan and is mild.
+- Move-2, f359–f362: the "This week · 9–15 June" header and the "Shopping list" pill are clipped at the top edge as they slide in during the pull-back.
+- Story 8.0s: an empty red date pill with no text sits above the plate. I can't see how long it lasts.
+- Move-3, f663–f672: the spaghetti plate shrinks into a faint ghost at the left edge, and the two other alternatives shrink to dots where they stand. It reads as things vanishing rather than leaving. This is minor.
+- Move-4, f749–f757: the "Chicken & spinach pizza" title slides across the pizza photo while both shrink, so dark serif text sits on a busy image for about 0.15s. This is B's clearest collision.
+- Story 14.0–18.0s: the bottom row of the list is clipped by the "Send list" button ("Onions ×2", "Rocket", "Butt…"). It reads as a scroll mask, but the text is half cut.
+- Move-5, f1180–f1184: the "Who's shopping?" pop-up collapses downward through the list, and its heading overlaps "THE REST OF THE WEEK" and "Chicken breasts".
+- Move-5, f1185: the list copy appears on top of the red "THU" tag.
+- Move-5, f1199–f1207: the phone enters cut by the right edge while the list card is still sliding off the left. The flying list copy disappears near the phone's left edge (f1206–f1207) without visibly landing before the notification appears (f1208). It is a near-miss.
+- Story 23.0s: the plate is the green salad but the faded label still says "Chicken & spinach pizza". At 25.0s the plate looks like the grilled chicken and beetroot but the label says "Farfalle, olives & rocket". The images change before their labels. At two frames a second I can't tell whether this lasts a few frames or longer.
+- Story 20.0s: the lock-screen notification text is tiny.
+- Story 30.0–31.5s: the end card is static for about 1.5s. That is acceptable for an end card.
+
+**C**
+- Story 2.0–3.0s: chat bubbles are cut by the top edge as the chat scrolls. This is deliberate and fine.
+- Story 3.5s: every bubble turns into a blank pill, which briefly looks like a failed load.
+- Story 6.5s: the growing card covers the word "Name" ("Nam" then the card, then "it."). It resolves by 7.0s.
+- Story 11.0–16.5s and move-1, f758–f817: the flanking cards are blurred, with doubled "Mira's 30th" titles. Cards are cut at both edges ("ira's 30th", "A'S 30T"). The credit line under the centre card is about 3 px on the tile and dim, so it can't be read.
+- Move-2, f1320–f1335: "Send it." fades while the avatars' progress rings fill. The rings are too small to register.
+- Move-2, f1340–f1349: a tiny phone appears among the Ana, Bea, Sam and Mei avatars, overlapping them, and scales to full size in about nine frames. It is a hard whip that starts on top of other elements.
+- Move-2, f1344–f1355, and story 22.5–23.5s: the "Zoe's phone" label sits on a yellow avatar, avatars peek out from behind the phone's top corners, and the blurred large card is cut by the right edge.
+- Move-3, f1424–f1430: the phone shrinks into the avatar cluster and is gone within about four frames.
+- Move-3, f1435: "in." is clipped at the right edge.
+- Move-3, f1440–f1478: the counter "1" in the high-contrast serif reads as a capital "I" or a text cursor ("I MIRA'S 30TH in.") for about 0.6s.
+- Story 27.0–29.5s: the "bringing cake" and "finally!" bubbles and the "x of 24 in" line are tiny and get lost in the crowd.
+- Move-4, f1815–f1838: the push-in is fast, about a 1.4× zoom in 0.4s. It cuts the avatar names "Mei", "Gus" and "Om…" at the frame edges.
+- Move-4, f1839–f1874: nothing changes except the cursor for about 0.6s, and story 30.5–31.5s suggests the hold is about 1s.
+- Move-5, f1920–f1923: "19" and "20" are superimposed and illegible.
+- Move-5, f1930–f1950: firework streaks cross "in." and "20" while four bursts compete with the counter.
+- Story 34.5–35.0s: the +1 chips are still scattered around the tiny card at 34.5s and gone by 35.0s. I can't see how they leave.
+- Story 35.5s: the wordmark is half revealed ("Plus C"). This is a wipe and is fine.
+- Story 36.0–38.0s: about 2s of near-static end card with faint fireworks. Acceptable, though long.
+
+#### 6. Would any of them embarrass its maker side by side?
+
+A would. Next to B it looks clearly worse, and the two would almost certainly be compared directly because both sell Larder and open with the same "What's for dinner?" line. Placed beside B's clean framing, A's three-second "sh soup" crop, the cursor covering labels, the empty pop-up and the switch to a stock-style photo with weak white text look amateur.
+
+C would not embarrass its maker, but it would read as busy and over-decorated. The "1 in." counter that reads as "I in." is the moment a viewer would most likely notice.
+
+B would hold up. Its flaws (the title running over the pizza, the pop-up collapse, the labels changing late) each last only a few frames.
+
+Limits of this reading: I couldn't hear the films, and I saw nothing between the half-second story tiles except inside the five one-second motion stretches. The text sizes in section 5 assume a 1920-wide master; I don't know the real resolution. The ranking is my own judgement.
+
+## Reader 2: GPT-6.1 Sol
+
+In this reader's line-up, **A** was Plus One, **B** was test 6 and **C** was test 5.
+
+1. RANKING: A, C, B.
+
+A above C: A has the strongest control of depth, focus and transitions between compositions. In A/move-1.jpg, f758–817, 12.63–13.62, the invitation carousel changes its foreground card while maintaining a convincing hierarchy between sharp foreground and softer background cards. In A/move-2.jpg, f1338–1355, 22.30–22.58, the move into the recipient’s phone connects two scenes through the invitation itself. C’s equivalent layout changes are less resolved: C/move-4.jpg, f747–755, 12.45–12.58, sends the title directly across the pizza before reaching its new position. A gets first place despite its excessive decorative movement and overlong attendance sequence.
+
+C above B: C gives the food and typography more room and makes stronger compositions from them. C/move-3.jpg, f659–694, 10.98–11.57, promotes the selected pizza from a small option into the main image through a continuous change of position and scale. B’s equivalent demonstration spends much more time inside a dense application window: B/story-01.jpg, 7.50–11.00. C also stages receipt of the list more clearly—C/move-5.jpg, f1208–1225, 20.13–20.42—than B’s phone entrance over a visually competing photograph, B/move-4.jpg, f1279–1324, 21.32–22.07.
+
+I inspected all 25 images. This ranking concerns visible design and the supplied motion samples; it does not establish normal-speed rhythm, sound quality or what happens between story tiles.
+
+2. WHAT IS BEING SOLD, AND WHAT HAPPENS
+
+A: Plus One sells event invitations with visual themes, guest distribution and attendance tracking. A confused group conversation becomes a birthday invitation, the host chooses its appearance and sends it, and guests respond until the attendance count reaches twenty.
+
+B: Larder sells weekly meal planning connected to an automatically updated shopping list. A week of dinner questions becomes a plan, salmon is replaced with soup, ingredients change, and the resulting list reaches Sam’s phone.
+
+C: Larder sells a weekly dinner plan whose shopping list keeps up with meal changes and can be shared. Seven meals appear, Thursday’s mussel spaghetti becomes chicken pizza, the list removes and adds ingredients, and Sam receives it.
+
+3. WHO I THINK MADE EACH FILM
+
+A: A professional studio. Low confidence: the strongest evidence is the coordinated carousel depth, focus and changing background palette, especially A/story-02.jpg, 12.00–17.50; a capable individual could also produce it.
+
+B: A freelance motion designer. Low confidence: the strongest evidence is the deliberate transformation from selected meal row into recipe detail in B/move-1.jpg, f1439–1466, 7.32–7.77, which shows planning beyond simply animating screenshots.
+
+C: A freelance motion designer. Low-to-moderate confidence: the strongest evidence is the consistent relationship between food photography, large editorial typography and compact interface elements, undermined by the unresolved title collision at 12.45–12.58.
+
+These are authorship guesses from the work, not reliable identification.
+
+4. STRONGEST MOMENT AND WEAKEST STRETCH
+
+A:
+Strongest: 12.63–13.62, A/move-1.jpg. The carousel has convincing spatial order, and the foreground handover remains understandable frame by frame.
+Weakest: 24.00–33.50, A/story-03. The film keeps restating the same attendance result through counters, travelling avatars, yellow tokens and fireworks. The story samples establish repetition; they cannot establish the exact rhythm throughout that stretch.
+
+B:
+Strongest: 14.00–16.50, B/story-02.jpg. Removing the old ingredients and bringing the soup ingredients into the list makes the product’s benefit concrete. Only half-second samples cover this action, so I cannot certify the intervening paths.
+Weakest: 21.08–25.42, B/move-4.jpg, B/move-5.jpg and B/story-02.jpg. The produce photograph adds clutter precisely when the viewer needs to read a phone list and a delivery message.
+
+C:
+Strongest: 13.00–17.50, C/story-02.jpg. The list visibly removes the mussel-dish ingredients, adds pizza ingredients and adjusts the chicken quantity. It is the clearest demonstration of a consequential product change, although most of this stretch has only story samples.
+Weakest: 12.42–12.60, C/move-4.jpg. The title travels through the pizza. This is an actual composition failure during motion, not merely an unattractive isolated endpoint.
+
+5. MOTION AND FRAME FINDINGS
+
+A:
+
+- A/move-2.jpg, f1296–1327, 21.60–22.12: the surrounding avatars repeatedly rotate into slivers and partly visible faces. Examples include the upper-right cluster around f1302–1305 and Bea around f1311–1315. These look like deliberate flips, not accidental missing frames, but they create distracting fragmentation around an otherwise stable invitation.
+- A/move-2.jpg, f1343–1355, 22.38–22.58, continuing into A/move-3.jpg, f1419–1438, 23.65–23.97: the enlarged background invitation becomes a huge blurred duplicate with its title cut by the right edge. The depth treatment is intentional; the resulting crop is ugly and competes with the recipient’s phone.
+- A/move-4.jpg, approximately f1839–1874, 30.65–31.23: the push towards the plus-one request cuts peripheral avatars and yellow tokens at the top and sides. It feels like the camera has enlarged the existing composition without adequately clearing its edges.
+- A/move-5.jpg, f1920–1925, 32.00–32.08: outgoing “19” and incoming “20” overlap into a tangled numeral. This is a deliberate counter transition, but the intermediate typography is muddy.
+- A/move-5.jpg, f1930–1953, 32.17–32.55: fireworks overlap the large attendance typography and surrounding guest markers. The celebration weakens the hierarchy instead of reinforcing the result.
+
+I found no definite accidental one-frame disappearance or teleport in A’s supplied stretches. Its problem is excessive concurrent movement more than broken continuity.
+
+B:
+
+- B/move-3.jpg, f1045–1084, 17.42–18.07: the camera move progressively cuts the application’s left side, including the meal title and image, while the shopping list also extends below the frame. Focusing on “Send list” is understandable, but the route leaves several visibly amputated elements.
+- B/move-4.jpg, f1279–1324, 21.32–22.07: “Sent to Sam.” builds over a photograph with strong light and dark patches. Parts of the pale serif lettering disappear into the background during its entrance; even once established, the photograph competes with it.
+- B/story-02.jpg, 22.00–24.50: the smaller line “17 items, on Sam’s phone.” has the same contrast problem. This concerns background interference, not simply the reduced tile size.
+- B/move-5.jpg, f1527–1541, 25.45–25.68: the incoming dark dinner question begins while the produce photograph is still fading away. Early letters have poor separation from that background, making the transition unnecessarily muddy.
+
+I found no definite accidental one-frame pop or broken positional continuity in B’s supplied stretches.
+
+C:
+
+- C/move-1.jpg, f255→256→257, 4.25→4.27→4.28: the first soup image goes from absent to an already substantial disc, then grows further. The same conspicuous scale entrance recurs for Tuesday at f271→272→273 and Wednesday at f287→288→289. These are deliberate entrances, but their first visible steps are abrupt.
+- C/move-1.jpg, f302–305, 5.03–5.08, and C/move-2.jpg, f308–355, 5.13–5.92: the horizontal travel slices through departing plates, day pills and captions at the left edge. The scrolling concept is clear, but the unmasked cuts through text make it feel mechanically cropped.
+- C/move-4.jpg, f747–755, 12.45–12.58: “Chicken & spinach pizza” crosses the food image as it moves from beside the pizza to underneath it. Around f750–754, black lettering sits directly on the textured food. This is the clearest motion defect in the comparison.
+- C/move-5.jpg, f1179–1183, 19.65–19.72: the recipient chooser slides down behind the fixed confirmation button, cutting through its names and circles. It is a deliberate dismissal, but the partial figures and text make the exit look cramped.
+- C/move-5.jpg, f1198–1201, 19.97–20.02: the incoming phone and outgoing shopping card overlap so that the old white interface temporarily fills much of the phone area. The transition passes through a confused hybrid image before separating.
+- C/story-02.jpg, 23.00: the green-salad image is visible while the previous “Chicken & spinach pizza” caption remains below it. C/story-03.jpg, 25.00, similarly shows the chicken-and-beetroot image with the previous farfalle caption. These may be brief transition overlaps; no motion sheet covers them, so their duration and exact cause are unknown.
+
+Across all three films, I cannot confirm a completely motionless hold longer than half a second from the consecutive-frame samples. C/story-03.jpg, 30.00–31.50, suggests a static end hold, but identical half-second samples do not prove nothing moved between them.
+
+Fine interface copy is often difficult to read on these sheets. I have not treated that alone as evidence that it is unreadable at delivery size.
+
+6. WOULD ANY EMBARRASS ITS MAKER?
+
+None is broadly embarrassing beside the others.
+
+C contains the one moment I would be embarrassed to show as finished professional motion work: the title crossing the pizza at 12.45–12.58. It is a visible staging error that should have been caught.
+
+A risks looking overworked during the attendance sequence. B risks looking like a competent interface demonstration with insufficient attention to its photographic background. Those are weaknesses, not grounds to call either film amateur.

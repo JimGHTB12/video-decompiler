@@ -7,7 +7,8 @@ name: tests
 # the installer gives a stranger that day, pre-releases included (three came out on the day this was published), which
 # is watched and does not fail the run: a fault in a pre-release is news, not this repository's failure. raea is left
 # where its installer puts it and nothing is set, which is what the README promises. On a private copy of this
-# repository the jobs run only when started by hand, so they use no paid minutes unless you ask them to.
+# repository a push runs the tests on Linux only (the cheapest minutes), and the three systems and the raea job run
+# when started by hand: every job skipped had shown a push as green though nothing had run.
 on:
   push:
     branches: [main]
@@ -23,11 +24,10 @@ concurrency:
 
 jobs:
   tests:
-    if: github.event_name == 'workflow_dispatch' || github.event.repository.private == false
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: ${{ fromJSON((github.event_name == 'workflow_dispatch' || !github.event.repository.private) && '["ubuntu-latest", "windows-latest", "macos-latest"]' || '["ubuntu-latest"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:

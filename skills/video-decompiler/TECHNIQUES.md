@@ -70,6 +70,7 @@ Nobody but the person can hear the film, so the sound is built from rules that h
 - **Make the sounds that matter audible on a phone**: presence between 1 and 5 kHz. A mix that measures well and has none reads as a flat bed at speed.
 - **Give it a floor and some width.** Films made here measure thinner in the low end and narrower in stereo than the films they were held against: a bass line under the chords, and events panned where they happen on screen.
 - **Rest before an arrival, and stop just before the name.**
+- **Two sound tools no accepted film has used.** `vd foley` makes a track (`media/foley.wav`) by rule from moves it reads in the film's code: camera turns, a word locking into place, and a size guessed from a cue's name. Nothing is measured from the drawn picture. `vd audio TRACK --tempo-map` makes a finished music track the film's beat: `score.json`'s `music` holds its tempo and the nearest whole frames a beat a 60 fps film can hold, and the film's `sound.py` takes its beat from there, so the picture's events, its own sound and the track share one clock; the track is stretched by at most 3% to that beat and placed so its first beat or its drop lands on one. It refuses a track with no steady beat rather than guess one, and a track whose beat is weak unless you give its tempo as you hear it (`--bpm`): a weak grid fits noise as well as music. Where the tempo could be read at its half or double, it takes the one nearest the film's own beat and says so. With no track mapped, the four worked films' clocks and mixes are byte for byte what they were. Nobody has listened to either tool on a finished film.
 - **Finish at -15 LUFS**, the wav's own true peak at -2.5 dB or lower (the export's encode lifts peaks, 2 to 3.5 dB on a bright mix; `vd export` measures the file and lowers its sound by up to 1 dB when that brings the peak under and keeps the level in range).
 
 ## Small things that removed faults
@@ -88,7 +89,7 @@ Each of these fixed a fault a reader or a scan had found on an accepted film.
 
 ## Handing a film to an editor
 
-What this skill delivers is one finished film. Parts an editor can work with are possible and not yet built into a command, so say so if you are asked for them. What was proven in pieces: `raea render --alpha` writes straight-alpha PNGs of a composition with no ground; a layer can be drawn alone only if it is a contiguous run of the film's paint order, and an effect that blends with what is under it (grain, a backdrop blur) comes out empty on its own; stems that are each limited on their own do not add back up to the mix, so hand over stems taken before the final limiter, with the finished mix beside them; a timeline file was written and read back by code, and no editing program has opened one.
+What this skill delivers is one finished film. `vd bridge` hands its timing on: a `cues.json` (the shape legible-film reads) bound by hash to the exported file it was timed on, so a cue list read against any other file says so, and its cuts as a Final Cut Pro 7 XML file and an OpenTimelineIO file, which place the picture and its sound alike (the host's in-point a gap before them) and name the sound the file has. It needs the export (`vd export` first, or `--video`). A test reads them back with legible-film's own readers when legible-film is on the machine; no editing program has opened one. Other parts an editor can work with are possible and not built into a command, so say so if you are asked for them. What was proven in pieces: `raea render --alpha` writes straight-alpha PNGs of a composition with no ground; a layer can be drawn alone only if it is a contiguous run of the film's paint order, and an effect that blends with what is under it (grain, a backdrop blur) comes out empty on its own; stems that are each limited on their own do not add back up to the mix, so hand over stems taken before the final limiter, with the finished mix beside them; a timeline file was written and read back by code, and no editing program has opened one.
 
 ## What `kit/` holds
 
@@ -102,6 +103,8 @@ A film started with `--like` gets that film's own kit and nothing else:
 | `linden` | `kit/core.tsx` (the clock, the curves, the plain parts); its camera is `PATH` in `film.tsx` and its nested worlds are `SLOTS` and `world` in `levels.tsx` |
 
 Every worked film's `sound.py` writes its clock and every event's beat to `kit/times.gen.ts`.
+
+`vd capture` (and `vd launch`, which makes a film folder and captures into it) adds two files to any film's kit: `kit/puppet.gen.ts`, the counts read from a repository and a command's output lines with their times, and `kit/PuppetPlane.tsx`, a plane that shows them in its own embedded faces. `vd launch` also puts the plane in its copy of Stet for four seconds from the NUMBERS cue, on Stet's paper; `vd capture` leaves where to put it to your film. The command runs with no shell, and a command still running at its timeout is stopped and recorded as stopped. No accepted film uses them.
 
 Each kit sizes things to words from `kit/metrics.gen.ts`, the letter widths of its own faces. For another face, make that table again: `python SKILL_FOLDER/tools/metrics.py SANS-VF.ttf MONO-VF.ttf`. Both must be variable fonts with a weight axis, and it refuses a static one. (A test film that changed its headline face without it typed its sentences with no caret.)
 
@@ -129,6 +132,8 @@ Put the take in the film's `media/` and name it in `score.json`: `"voice": "medi
 raea writes (`raea cut TAKE "line"` transcribes a take into `words.json`), so copy that list in. `vd sound` reads them:
 it ducks the bed, the Tone music and, in a film copied with `--like`, the film's own mix under the words and checks the level in each pause against the words beside it.
 Your film's own code can read `score.words` to put a caption or a move on a word.
+
+A recorded take can be cleaned first: `vd audio TAKE --clean-voice` takes out rumble below 80 Hz, steady noise, harsh s sounds and a little of the level's swing, and brings it toward -20 LUFS, into `media/` and `score.json`'s `voice`. Each step is measured, and one that costs the speech more than 3 dB is refused and named, with the steps before it kept. Listen to the result: the measure cannot tell a clean voice from a dulled one.
 
 When someone else records the voice, the words are frozen once they record. So settle them on the cards, read by
 strangers, and build the hardest shot as one frame before the recording, since that is the last moment a line can still

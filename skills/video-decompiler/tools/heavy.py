@@ -157,7 +157,10 @@ def main():
         print(f"heavy.py: {e}; {what[:200]} did not run", flush=True)
         return 2
     try:
-        proc = subprocess.Popen(cmd)
+        # off Windows nothing ends the job when this wrapper is killed by force, so the job holds the queue's lock too, as
+        # raea_run's renders do: the queue stays shut while an orphaned job is still at work (on Windows die_with_us ends it)
+        keep = {"pass_fds": (held.fileno(),)} if held is not None and os.name != "nt" else {}
+        proc = subprocess.Popen(cmd, **keep)
         job = raea_run.die_with_us(proc)  # noqa: F841  the job ends if heavy.py is stopped
         code, why = watch(proc, a.stall)
         if why:

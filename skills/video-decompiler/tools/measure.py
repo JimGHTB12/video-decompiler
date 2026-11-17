@@ -91,9 +91,9 @@ def analysed_frame(path, fps, k):
 
 
 LOOK_W, LOOK_H = 960, 540  # holds are looked at this size: at AW x AH a 3 px gap between headline lines vanishes
-VERSION = 6               # bump when a measure changes, so compares never mix measurements made two ways (5: the summary
+VERSION = 9               # bump when a measure changes, so compares never mix measurements made two ways (5: the summary
                           # says how the film moves, as a scene or as a sheet being slid, read by space.py. 6: and in how
-                          # many of its frames the middle is lit and all four corners are darker)
+                          # many of its frames the middle is lit and all four corners are darker. 7: a beat-grid fit; 8: tempo_map's beat-grid fit, which reads Stet as 150, not 75; 9: each hold's ground, its border's commonest colour)
 DARKER = 0.9              # a corner is darker than the middle when it gives off less than nine tenths of its light
 LIT = 0.02                # and a middle this dark isn't lit at all: a black frame is not a lit middle
 
@@ -149,7 +149,8 @@ def look(rgb):
     _, labels, centres = cv2.kmeans(small, 4, None, (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0), 2, cv2.KMEANS_PP_CENTERS)
     share = np.bincount(labels.ravel(), minlength=4) / len(labels)
     palette = sorted(((("#%02x%02x%02x" % tuple(int(v) for v in c)), round(float(s), 3)) for c, s in zip(centres, share)), key=lambda x: -x[1])
-    return {"occupancy": round(float(mask.mean()), 3), "detail": round(float(cv2.Canny(gray, 60, 160).mean() / 255), 4),
+    ground = "#%02x%02x%02x" % tuple(int(round(v)) for v in background(rgb))
+    return {"occupancy": round(float(mask.mean()), 3), "detail": round(float(cv2.Canny(gray, 60, 160).mean() / 255), 4), "ground": ground,
             "bands": [round(b, 3) for b in sorted(bands, reverse=True)[:6]], "largest_band": round(max(bands), 3) if bands else 0.0, "palette": palette}
 
 
@@ -195,18 +196,20 @@ def audio(path, duration):
         if flux[i] >= flux[i - 1] and flux[i] > flux[i + 1] and flux[i] > local.mean() + 2 * local.std() and level[i] > -50:
             if not onsets or i - onsets[-1] >= 5:
                 onsets.append(i)
-    env = flux - flux.mean()
-    ac = np.correlate(env, env, mode="full")[n - 1:]
-    lags = np.arange(30, min(100, n - 1))  # 60 to 200 bpm at 10 ms a step
+    # The tempo is tempo_map's beat-grid fit (attacks scored against a grid), not the peak of a level autocorrelation:
+    # on the four accepted films that peak read 150, 240, 222 and 67 BPM for 150, 120, 112.5 and 100 (one right, two at
+    # no octave of the truth); the grid fit reads 150, 120, 112.5 and 200 (Linden's double: every true beat lies on it).
+    # Attacks alone cannot tell a tempo from its half or double, so `octave` names both beside it.
     tempo = None
-    if len(lags) and ac[0] > 0:
-        best = lags[np.argmax(ac[lags])]
-        strength = float(ac[best] / ac[0])  # whether there's a pulse at all, from its strongest period
-        half = best // 2
-        if half >= 25 and ac[half - 1:half + 2].max() >= 0.4 * ac[best]:  # music often accents every other beat
-            best = half - 1 + int(np.argmax(ac[half - 1:half + 2]))
-        if strength > 0.1:
-            tempo = {"bpm": round(6000 / best, 1), "strength": round(strength, 2)}
+    try:
+        import tempo_map
+        times, weights, _, _ = tempo_map.attacks(x)
+        period, _, strength = tempo_map.fit(times, weights, len(x) / 16000)
+        if strength > 0.2:
+            bpm = float(60.0 / period)
+            tempo = {"bpm": round(bpm, 1), "strength": round(float(strength), 2), "octave": [round(bpm / 2, 1), round(bpm * 2, 1)]}
+    except ValueError:  # fewer than six strong attacks: no pulse to measure
+        pass
     loud = level[level > -60]
     return {"onsets": [round(i * hop / 16000, 3) for i in onsets], "tempo": tempo, "mean_db": round(float(loud.mean()), 1) if len(loud) else None}
 

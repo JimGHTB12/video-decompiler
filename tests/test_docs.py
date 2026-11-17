@@ -18,13 +18,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SKILL = ROOT / "skills" / "video-decompiler"
 EXAMPLE = SKILL / "examples" / "what-stopped-you"
-PAGES = [ROOT / "README.md", ROOT / "CONTRIBUTING.md", *sorted(f for f in SKILL.glob("*.md") if ".local." not in f.name)]
+PAGES = [ROOT / "README.md", ROOT / "CONTRIBUTING.md", ROOT / "docs" / "EVIDENCE.md", *sorted(f for f in SKILL.glob("*.md") if ".local." not in f.name)]
 SKIP = {"node_modules", "__pycache__", ".git"}
 
 # code files a project, a kit or a render makes, which the pages name and the repository rightly doesn't hold
-MADE = {"edit.final.tsx", "edit.first.tsx", "edit.swap.tsx", "beats.ts", "fonts.gen.ts", "card.gen.ts", "styles.gen.ts", "type.gen.ts", "media.gen.ts", "finish.gen.ts"}
+MADE = {"edit.final.tsx", "edit.first.tsx", "edit.swap.tsx", "beats.ts", "fonts.gen.ts", "card.gen.ts", "styles.gen.ts", "type.gen.ts", "media.gen.ts", "finish.gen.ts", "dna.gen.ts", "puppet.gen.ts", "PuppetPlane.tsx"}
 # pages a project or a kit makes
-WRITTEN = {"GAP.md", "READINGS.md", "READING.md", "REPORT.md", "BRIEF.md", "DOSSIER.md", "SEE.md", "RIVAL.md", "SOURCES.md", "KIT-README.md", "LENS.local.md", "CLAUDE.md", "AGENTS.md", "REFERENCE.md", "NOTES.md"}
+WRITTEN = {"GAP.md", "REPO-FACTS.md", "READINGS.md", "READING.md", "REPORT.md", "BRIEF.md", "DOSSIER.md", "SEE.md", "RIVAL.md", "SOURCES.md", "KIT-README.md", "LENS.local.md", "CLAUDE.md", "AGENTS.md", "REFERENCE.md", "NOTES.md"}
 # raea's own flags, which raea_run.py hands on without naming
 RAEA = {"--at", "--frame", "--quality", "--kbps", "--manifest", "--input", "--size", "--fps", "--composition"}
 

@@ -182,6 +182,27 @@ def scan(film, to=None):
                      + ("; " + "; ".join(off) if off else ": ok"))
     else:
         lines.append("  loudness: the file has no sound")
+    import flash_scan
+    fl = flash_scan.screen_video(film)
+    gb, cb, rb = fl["busiest_general"], fl["busiest_classic"], fl["busiest_red"]
+    # Calibrated to WCAG 2.3.1's own terms: a 10-degree field (341 x 256 px on a 1024 x 768 screen), and only paired,
+    # same-direction changes over area-averaged pixels. On the four accepted films the busiest such second holds 3 or 4
+    # changes (the limit is 6: three flashes), so none is over it. A flash over it is a fault to fix. Motion and
+    # patterns (pans, slides, a fine grid aliased by sampling) are said on a line of their own, as not WCAG flashes.
+    confirmed = bool(fl["classic_flagged"])
+    b = max((cb, rb), key=lambda x: x["transitions_in_1s"])
+    lines.append(f"  flash (WCAG 2.3.1): {cb['transitions_in_1s']} paired changes in a second at most (at {cb['at_s']} s), "
+                 f"red {rb['transitions_in_1s']}: " + ("over the limit of 6" if confirmed else "ok"))
+    if confirmed:
+        kind = "red flashing" if b is rb else "flashing"
+        fixes.append(f"fix before anyone watches: {kind} over WCAG 2.3.1's three flashes a second: {b['transitions_in_1s']} "
+                     f"changes at {b['at_s']} s, over a quarter of the viewer's central ten degrees. Slow it, shrink it, or lower its contrast")
+    elif fl["flagged"]:
+        # the busiest of what was flagged, luminance or red (a red-only pattern printed "0 changes in a second at None s")
+        n, when = max(((r[k + "_max_per_s"], r[k + "_at_s"]) for r in fl["flagged"] for k in ("general", "red", "red_coherent")
+                       if r.get(k + "_at_s") is not None), default=(gb["transitions_in_1s"], gb["at_s"]), key=lambda x: x[0])
+        lines.append(f"  motion or patterns (not WCAG flashes): {n} changes in a second at {when} s; "
+                     "a stripe or checkerboard reversing there is worth a look at full size")
     text = "\n".join(lines + fixes + checks)
     if to:
         Path(to).parent.mkdir(parents=True, exist_ok=True)

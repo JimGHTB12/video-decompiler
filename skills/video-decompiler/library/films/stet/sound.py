@@ -14,6 +14,7 @@ import numpy as np
 
 # ---- the one clock: 60 frames a second, 24 frames a beat (150 beats a minute)
 SR, FPS, FB = 48000, 60, 24
+FB = int((json.loads(pathlib.Path("score.json").read_text(encoding="utf-8")).get("music") or {}).get("fb") or FB)   # a track mapped by vd audio --tempo-map sets the beat
 BEAT = FB / FPS
 ACT1, LATER, LAST = 11, 16, 77         # act 1 ends on the film's beat 11; the later acts begin on their beat 16 and end on 77
 SHIFT = LATER - ACT1                   # so the later acts are drawn and heard SHIFT beats earlier than their numbers say

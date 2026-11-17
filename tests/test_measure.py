@@ -313,6 +313,25 @@ def a_short_window_or_broken_sound_is_not_measured():
                 assert "couldn't read" in str(e), e
 
 
+def tempo_known():
+    """A drum pattern at 112.5 BPM (kick on each beat, hat on each half beat, accent every bar) is read as 112.5.
+    broke: measure.audio took the highest level-autocorrelation lag in 60-200 BPM, then halved it; on the four accepted
+    films it read 150, 240, 222 and 67 BPM for 150, 120, 112.5 and 100, and steal pinned those as the film's clock."""
+    sys.path.insert(0, str(TOOLS))
+    import measure
+    bpm, dur = 112.5, 12.0
+    beat = 60.0 / bpm
+    kick = "+".join(f"between(t,{i * beat:.4f},{i * beat + 0.06:.4f})*(1+{int(i % 4 == 0)})" for i in range(int(dur / beat)))
+    hat = "+".join(f"between(t,{(i + 0.5) * beat:.4f},{(i + 0.5) * beat + 0.02:.4f})" for i in range(int(dur / beat)))
+    with tempfile.TemporaryDirectory() as d:
+        wav = Path(d) / "beat.wav"
+        subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                        f"aevalsrc='0.4*sin(2*PI*70*t)*({kick})+0.15*sin(2*PI*5000*t)*({hat})':s=44100:d={dur}", str(wav)], check=True)
+        t = measure.audio(wav, dur)["tempo"]
+        assert t and abs(t["bpm"] - bpm) < 0.5, f"a 112.5 BPM pattern is read as 112.5: {t}"
+        assert 56.0 < t["octave"][0] < 57.0 and 224.0 < t["octave"][1] < 226.0, f"its half and double are named as the octave it can't rule out: {t}"
+
+
 if __name__ == "__main__":
     a_short_window_or_broken_sound_is_not_measured()
     a_cut_short_file_is_not_measured()
@@ -320,6 +339,7 @@ if __name__ == "__main__":
     one_to_one()
     palette_and_memory()
     small_things()
+    tempo_known()
     where_the_light_is()
     windowed()
     main()

@@ -26,6 +26,11 @@ from PIL import Image, ImageDraw, ImageFont
 
 TOOLS = Path(__file__).resolve().parent
 sys.path.insert(0, str(TOOLS))
+def measure_versions(measure, see):
+    """The versions of the measures this file holds: a cached one made by other code is measured again (lean.measures_of)."""
+    return {"measure": measure.VERSION, "see": see.VERSION}
+
+
 from measure import audio as vd_audio  # noqa: E402  product onset detector (10 ms hop, flux > mean + 2 sd, level > -50 dB)
 
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0
@@ -513,7 +518,9 @@ def main():
         dr.text((sx(t) - 4, H - 16), str(t), fill=(0, 0, 0), font=f12)
     cv.save(out / "curves.png")
 
-    res = {"film": str(film), "probe": info,
+    import measure as measure_py
+    import see as see_py
+    res = {"film": str(film), "probe": info, "versions": measure_versions(measure_py, see_py),
            "A_time": {"length_s": dur, "scene_changes": changes, "shots": len(shots), "shot_len_median": float(np.median(shot_lens)),
                       "shot_len_min": float(min(shot_lens)), "shot_len_max": float(max(shot_lens)),
                       # not transcribed: the word measures are unknown (None, left out of every gap table), never zero

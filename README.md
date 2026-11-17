@@ -25,6 +25,9 @@ Five things here stand in for what an agent lacks:
 - **A board, and rules for it.** The whole film on one page before any code. Every change of scene is one of five kinds, and "nothing" is not one: becomes, carried, matched, door, change of ground. ([`BOARD.md`](skills/video-decompiler/BOARD.md), [`WORLD.md`](skills/video-decompiler/WORLD.md))
 - **Traps, and a queue.** More than fifty known faults of the engine, each with its way out. Two of them: a mesh is built once, so resizing a shape later does nothing; past about nine frame-sized planes in perspective, the nearest vanish without a message. And one render at a time on a machine, however many agents share it. ([`TRAPS.md`](skills/video-decompiler/TRAPS.md))
 
+
+Eight newer commands came after the four films, and no accepted film has been made through them: cleaning a recorded voice and making a music track the film's beat (`vd audio`), handing the cuts to an editor (`vd bridge`), fitting a reference's moves (`vd steal`), putting a repository's counts on screen (`vd capture`, `vd launch`), a sound track made by rule from the film's moves (`vd foley`), four world sketches for readers (`vd evolve`), and a browser page that imitates the film (`vd playable`). The export's scan also checks for flashing now. [`SKILL.md`](skills/video-decompiler/SKILL.md) lists them apart from the steps, with what each does not yet do.
+
 Whether these make a film started cold better than the engine alone would has not been measured. [The record](docs/EVIDENCE.md) says what has.
 
 ## Two ways in, one flow
@@ -47,7 +50,7 @@ Either way the steps are the same, and [`SKILL.md`](skills/video-decompiler/SKIL
 
 **Not proven:** lit 3D scenes, scenery drawn in code, real moving footage, generated pictures, and films under ten seconds. The tools can draw them; no film of those kinds has been accepted yet, and the pages say so where it matters.
 
-**Honest limits.** Nobody but you can hear the film: the agent checks levels, not tunes. The music is written in code (one film plays it on recorded instruments), so bringing your own finished track or a recorded voice is not yet a paved road. The four films above were made in one day by an agent with one person watching each cut and saying what was wrong. Started cold (a fresh agent, this folder and one paragraph), the skill has so far taken four test films through its own readers, each clear and plain. Both blind readers ranked every one below the worked film beside it. The person the four films were made for watched the two latest and called them close to the level of the four, with their type the place they fall short; [`BOARD.md`](skills/video-decompiler/BOARD.md) now records how the four set type. `WORLD.md` is the page written to close the gap between a clean film and one people remember; it is the newest page here and the least tested.
+**Honest limits.** Nobody but you can hear the film: the agent checks levels, not tunes. The music is written in code (one film plays it on recorded instruments), so bringing your own finished track or a recorded voice is not yet a paved road. `vd audio` now cleans a recorded voice, and can make a finished music track the film's beat: the worked film's own `sound.py` then times every event on the track's tempo and the export lays the track in. Neither has been used on an accepted film, and no one has listened to a film made that way. The four films above were made in one day by an agent with one person watching each cut and saying what was wrong. Started cold (a fresh agent, this folder and one paragraph), the skill has so far taken four test films through its own readers, each clear and plain. Both blind readers ranked every one below the worked film beside it. The person the four films were made for watched the two latest and called them close to the level of the four, with their type the place they fall short; [`BOARD.md`](skills/video-decompiler/BOARD.md) now records how the four set type. `WORLD.md` is the page written to close the gap between a clean film and one people remember; it is the newest page here and the least tested.
 
 ## What is whose
 
@@ -137,7 +140,7 @@ Use the video-decompiler skill to make me a film like PATH/TO/FILM.mp4, for PROD
 - [`BOARD.md`](skills/video-decompiler/BOARD.md), [`TAKE-APART.md`](skills/video-decompiler/TAKE-APART.md): the film on one page, and how to read someone else's.
 - [`EYES.md`](skills/video-decompiler/EYES.md): looking, the scan, the blind readers' briefs word for word, and the person.
 - [`TECHNIQUES.md`](skills/video-decompiler/TECHNIQUES.md), [`TRAPS.md`](skills/video-decompiler/TRAPS.md): what is proven to draw, and the known engine faults with their ways out.
-- `tools/vd.py`: the front door (`doctor`, `new`, `look`, `sound`, `render`, `export`, `scan`, `pack`, `measure`, `pin`, `profile`).
+- `tools/vd.py`: the front door (`doctor`, `new`, `look`, `sound`, `render`, `export`, `scan`, `pack`, `measure`, `pin`, `profile`; and, not yet proven on a film, `steal`, `capture`, `launch`, `foley`, `evolve`, `playable`, `audio`, `bridge`).
 - `library/films/`: the worked films. The rest of `library/` is older starters and recipes, kept for the unproven kinds. Every film folder `vd new` makes carries `LICENSE-video-decompiler.txt`, the MIT notice for the code copied into it.
 
 ## What it writes on your machine
@@ -156,7 +159,7 @@ Nothing is sent anywhere: no tool here uses the network.
 
 Run `vd doctor --full` and open an issue here with its whole output and what you asked for: it names the machine, every missing part and the first thing that failed (it prints paths on your machine too, so read it before you post it). Known engine faults and their ways out are in `TRAPS.md`.
 
-Two limits of the render queue are known and not yet mended; a review of the code found them, and neither has been seen in use. On macOS and Linux, a heavy job (`tools/heavy.py`) whose wrapper is killed by force can go on running while the queue lets the next job start; on Windows the job ends with its wrapper. And on a disk too full to write the queue's small note, a render started by a job that holds the queue can wait on its own parent until its time runs out.
+Two limits of the render queue that a review of the code found are mended, each with a test. On macOS and Linux, a heavy job (`tools/heavy.py`) whose wrapper is killed by force now holds the queue's lock itself, so the queue stays shut until the job ends (on Windows the job ends with its wrapper); that test runs only on macOS and Linux. And on a disk too full to write the queue's small note, a render started by a job that holds the queue now sees its parent's hold and does not wait on it.
 
 ## Tests
 
