@@ -123,7 +123,10 @@ LOWEST, HIGHEST = 60.0, 200.0   # the tempos the fit reads, in BPM
 
 
 def fit(times, weights, duration, prior=None, bounds=None):
-    if prior and not LOWEST <= prior <= HIGHEST:
+    if prior is not None and prior <= 0:
+        # read as "no tempo given" (0 is false), so --bpm 0 passed the range check (a review's finding)
+        raise ValueError(f"a tempo of {prior:g} BPM is no tempo; give the beat as you hear it, {LOWEST:g} to {HIGHEST:g} BPM")
+    if prior is not None and not LOWEST <= prior <= HIGHEST:
         # its search band (the prior +-3%) lay wholly outside the range, so nothing was searched and the fit crashed
         other = prior / 2 if prior > HIGHEST else prior * 2
         raise ValueError(f"a tempo of {prior:g} BPM is outside the {LOWEST:g} to {HIGHEST:g} BPM this reads; give the same beat "

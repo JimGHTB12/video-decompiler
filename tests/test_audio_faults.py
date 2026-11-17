@@ -330,6 +330,15 @@ def test_a_track_that_speeds_up_is_reported_and_refused_and_a_tempo_out_of_range
         assert isinstance(r, SystemExit) and "116" in str(r.code), r
         r, _ = quiet(lean.main, ["audio", str(steady), "--tempo-map", "--bpm", "232", "--film", str(film)])
         assert isinstance(r, SystemExit) and "116" in str(r.code) and (film / "score.json").read_bytes() == before, r
+        # 0 read as "no tempo given" and slipped past the range (a review's finding); below zero too
+        for bad in (0, -5):
+            try:
+                tempo_map.analyse_file(steady, bpm=bad)
+                raise AssertionError(f"--bpm {bad} was taken")
+            except ValueError as e:
+                assert "no tempo" in str(e), e
+            r, _ = quiet(lean.main, ["audio", str(steady), "--tempo-map", "--bpm", str(bad), "--film", str(film)])
+            assert isinstance(r, SystemExit) and "no tempo" in str(r.code) and (film / "score.json").read_bytes() == before, (bad, r)
 
 
 def test_a_drop_lands_on_the_beat_named():

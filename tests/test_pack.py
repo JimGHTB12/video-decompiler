@@ -121,17 +121,35 @@ def test_a_lineup_of_four_films_under_dealt_letters():
 
 def test_each_story_tile_shows_the_frame_at_its_label():
     # broke: ffmpeg's fps filter keeps the last frame of each half second centred on a tick, so the tile labelled 31.00 s
-    # showed the frame at 31.167 (and 0.00 showed 0.208): a cut read off a story tile was read in the wrong shot
+    # showed the frame at 31.167 (and 0.00 showed 0.208): a cut read off a story tile was read in the wrong shot. Then
+    # round=up was still a frame out, and from a start between frames a whole tile late: a pack from 9.008 s showed frame
+    # 570 twice where 540 was on screen (a review's finding). Each frame carries its number in three bands of base-7
+    # digits, which survive the encode and the scale to a tile.
     import numpy as np
+    def numbered(path, fps, n):
+        frames = np.zeros((n, 36, 63), np.uint8)
+        for i in range(n):
+            for k, d in enumerate((i // 49, (i // 7) % 7, i % 7)):
+                frames[i, :, k * 21:(k + 1) * 21] = 20 + 33 * d
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "gray", "-s", "63x36", "-r", str(fps), "-i", "-",
+                        "-c:v", "libx264", "-qp", "0", "-pix_fmt", "yuv444p", str(path)], input=frames.tobytes(), check=True)
+    def index_of(im):
+        g = np.asarray(im.convert("L"), float)
+        w = g.shape[1] // 3
+        d = [int(round((float(np.median(g[4:-4, k * w + 8:(k + 1) * w - 8])) - 20) / 33)) for k in range(3)]
+        return d[0] * 49 + d[1] * 7 + d[2]
     with tempfile.TemporaryDirectory() as tmp:
-        clip = Path(tmp) / "count.mp4"
-        frames = np.stack([np.full((36, 64), 3 * i, np.uint8) for i in range(72)])        # 3 s at 24 fps, frame i at grey 3i
-        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "gray", "-s", "64x36", "-r", "24", "-i", "-",
-                        "-c:v", "libx264", "-qp", "0", "-pix_fmt", "yuv444p", str(clip)], input=frames.tobytes(), check=True)
-        for start in (0.0, 0.5):
-            for t, im in pack.tiles(clip, start=start):
-                shown = round(float(np.asarray(im.convert("L")).mean()) / 3)
-                assert shown == int(t * 24 + 1e-6), f"the tile labelled {t:.2f} s shows the frame at {shown / 24:.3f} s"
+        for fps in (24, 30, 60):
+            n = 240
+            clip = Path(tmp) / f"count{fps}.mp4"
+            numbered(clip, fps, n)
+            for start in (0.0, 0.5, 0.27, 1.008, 2.0167, 3.3333, n / fps - 1.0):
+                got = pack.tiles(clip, start=start, length=1.5)
+                want = len([k for k in range(4) if start + k / 2 < min(start + 1.5, n / fps) - 1e-9])
+                assert len(got) == want, f"{fps} fps from {start} s: {len(got)} tiles, not {want}"
+                for t, im in got:
+                    shown, on = index_of(im), min(int(t * fps + 1e-6), n - 1)
+                    assert shown == on, f"{fps} fps from {start} s: the tile labelled {t:.3f} s shows frame {shown}, not {on}"
 
 
 def test_ours_alone_has_ten_stretches_and_no_lineup_without_against():

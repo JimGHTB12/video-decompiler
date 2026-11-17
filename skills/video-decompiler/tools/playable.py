@@ -266,7 +266,7 @@ function boot() {
     const s = Math.min((wrap.clientWidth - 24) / W, (wrap.clientHeight - 24) / H);
     stage.style.width = W + "px";
     stage.style.height = H + "px";
-    stage.style.transform = `scale(${Math.max(0.1, s).toFixed(4)})`;
+    stage.style.transform = `scale(${Math.max(0.001, s).toFixed(4)})`;   // a 10% floor cropped the frame in a pane under 216 px (a review's finding)
   }
   window.addEventListener("resize", resizeStage);
   resizeStage();

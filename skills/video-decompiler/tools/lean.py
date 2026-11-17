@@ -133,7 +133,11 @@ def outdir(d):
     apart there, so the folder keeps a note of whose it is. When a film folder of the same name from another place
     comes, the note is rewritten and what the first left for reuse (its drawn picture, its built sound) is dropped:
     an export checks only that a kept picture is newer than its sources, and would have put this film's sound on the
-    other film's picture. One line says so. The other film's finished cuts stay under cuts/."""
+    other film's picture. One line says so. Only what an export makes again is removed (a picture an export drew, the
+    built sound, the scan); everything else of the other film's (its cuts, its latest film, share copy and sheets, its
+    editor timelines, its evolve keys, a picture with no record of its draw) is moved aside to earlier-folder/N, so this
+    folder's vd clean --keep-cuts never counts the other film's cuts as its own (a review's finding: B/Twin's cut 2
+    made A/Twin's only cut "older" and clean removed it)."""
     d = Path(d).resolve()
     o = OUTROOT / d.name
     o.mkdir(parents=True, exist_ok=True)
@@ -157,12 +161,20 @@ def outdir(d):
                 # other film); its evolve keys are kept, moved aside, since nothing else holds them
                 # each takeover its own folder: a second takeover once replaced the first one's keys there
                 aside = next(o / "earlier-folder" / str(n) for n in range(1, 10000) if not (o / "earlier-folder" / str(n)).exists())
-                for f in [*o.glob("evolve-*-KEY.txt"), *o.glob("evolve-*-divergence.json")]:
-                    aside.mkdir(parents=True, exist_ok=True)
-                    os.replace(f, aside / f.name)
-                shutil.rmtree(o / "bridge", ignore_errors=True)   # the other film's cue list and timelines, bound to its export
-                for f in [*o.glob("*.picture.mp4"), o / "sound.wav", o / "sound-raw.wav", o / f"{d.name}.mp4", o / f"{d.name}-share.mp4",
-                          *o.glob(f"{d.name}-sheet*.jpg"), o / "scan.txt", o / "sound.txt"]:
+                drawn = [f for f in o.glob("*.picture.mp4") if is_drawn(f)]
+                undrawn = [f for f in o.glob("*.picture.mp4") if f not in drawn]
+                keep = [*o.glob("evolve-*-KEY.txt"), *o.glob("evolve-*-divergence.json"), o / "bridge", o / "cuts",
+                        *hand_in_files(o / f"{d.name}.mp4"), *undrawn, *(picture_note(f) for f in undrawn)]
+                for f in keep:
+                    if os.path.lexists(f):
+                        aside.mkdir(parents=True, exist_ok=True)
+                        try:
+                            os.replace(f, aside / f.name)
+                        except OSError as e:
+                            raise SystemExit(f"stopped: {o} holds the work of another film folder called {d.name} ({was}), and {f.name} could not be "
+                                             f"moved aside to {aside} ({e.strerror or e}): something has it open. Close it, or give this folder another name, "
+                                             "then run this again.") from None
+                for f in [*drawn, *(picture_note(f) for f in drawn), o / "sound.wav", o / "sound-raw.wav", o / "scan.txt", o / "sound.txt"]:
                     try:
                         f.unlink(missing_ok=True)
                     except OSError as e:
@@ -177,8 +189,8 @@ def outdir(d):
                              "and this folder's command would clear its picture and sound from under it. Wait for it to end, or give this folder another name. "
                              "Nothing was changed.") from None
         print(f"vd: {o} held the outputs of another film folder called {d.name} ({was}). It is this folder's now: the picture and sound kept there for "
-              "reuse, its latest cut's copies and its scan were dropped, so none of the other film's is taken for this one's; its cuts stay under cuts/, "
-              "numbered on from, and its evolve keys are in earlier-folder/N/. "
+              "reuse and its scan were dropped, so none of the other film's is taken for this one's; its cuts, latest film, share copy, sheets, "
+              "timelines and evolve keys are in earlier-folder/N/, and this folder's cuts start again at 1. "
               "Two films on one machine want two names.", file=sys.stderr, flush=True)
     return o
 
@@ -441,11 +453,19 @@ def hand_in(dest):
     run([PY, "-X", "utf8", TOOLS / "heavy.py", "--stall", "180", "--", "ffmpeg", "-y", "-v", "error", "-i", dest, "-c:v", "libx264", "-preset", "slow", "-crf", "20",
          "-pix_fmt", "yuv420p", "-color_primaries", "smpte170m", "-color_trc", "smpte170m", "-colorspace", "smpte170m", "-c:a", "copy",
          "-movflags", "+faststart", share], check=True)
-    for old in dest.parent.glob(dest.stem + "-sheet*.jpg"):      # one sheet keeps its name; several are NAME-sheet_000.jpg ...
+    for old in sheets_of(dest):      # one sheet keeps its name; several are NAME-sheet_000.jpg ...
         old.unlink()
     run([PY, "-X", "utf8", TOOLS / "sheet.py", dest, "-o", dest.with_name(dest.stem + "-sheet.jpg"), "--fps", "4", "--cols", "4", "--rows", "4",
          "--width", "480"], check=True, capture_output=True)
-    return share, sorted(dest.parent.glob(dest.stem + "-sheet*.jpg"))
+    return share, sheets_of(dest)
+
+
+def sheets_of(film):
+    """FILM's timed sheets beside it, NAME-sheet.jpg or NAME-sheet_NNN.jpg, matched as text: a glob built from the name
+    took another film's sheets when the name held [ or ? (draft[1] matched draft1), a review's finding."""
+    film = Path(film)
+    own = re.compile(re.escape(film.stem) + r"-sheet(_\d+)?\.jpg")
+    return sorted(f for f in film.parent.iterdir() if own.fullmatch(f.name)) if film.parent.is_dir() else []
 
 
 def raea_render(d, entry, out, *flags, env=None):
@@ -1247,7 +1267,7 @@ def cmd_render(a):
     except (OSError, ValueError):
         seen = {}
     # frames f0-f1 now come from today's sources and the rest from the last full draw: vd export draws it whole again
-    note.write_text(json.dumps({**seen, "spliced": seen.get("spliced", []) + [[f0, f1]]}), encoding="utf-8")
+    note.write_text(json.dumps({**seen, "spliced": seen.get("spliced", []) + [[f0, f1]], "drawn": drawn_record(pic)}), encoding="utf-8")
     w = split_wait(secs, line)
     print(f"rendered frames {f0}-{f1 - 1} ({(f1 - f0) / fps:.2f} s of film) in {secs:.1f} s" + (f" ({w[0]:.0f} s waiting in the queue, {w[1]:.0f} s rendering)" if w else "")
           + f"; spliced into {pic} in {time.monotonic() - t0:.1f} s")
@@ -1274,9 +1294,29 @@ def source_files(d):
 
 
 def picture_note(pic):
-    """Beside the cached picture: what it was drawn from ({"files": source_files at the draw}) and the stretches a
-    vd render spliced in since ({"spliced": [[f0, f1], ...]})."""
+    """Beside the cached picture: what it was drawn from ({"files": source_files at the draw}), the stretches a
+    vd render spliced in since ({"spliced": [[f0, f1], ...]}), and the picture file as the draw left it ({"drawn":
+    drawn_record}), which tells it from anything later put at its name."""
     return pic.with_name(pic.name + ".sources.json")
+
+
+def drawn_record(pic):
+    st = Path(pic).stat()
+    return {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
+
+
+def is_drawn(pic):
+    """Whether PIC is the picture an export or a splice drew there, as its note recorded it: only such a picture is
+    one an export makes again. A note alone said so of a finished film published at a former picture's name, and plain
+    clean removed it (a review's finding). A picture whose note has no record (drawn before 0.2.2) is not counted."""
+    pic = Path(pic)
+    if not pic.is_file() or _linked(pic):
+        return False
+    try:
+        seen = json.loads(picture_note(pic).read_text(encoding="utf-8"))
+        return isinstance(seen, dict) and seen.get("drawn") == drawn_record(pic)
+    except (OSError, ValueError):
+        return False
 
 
 def picture_current(d, pic):
@@ -1372,16 +1412,19 @@ CUT = re.compile(r"(.+)-cut(\d+)\.mp4")
 
 
 def cut_of(out, stem):
-    """(N, path) of the next cut of `stem`: OUT/cuts/STEM-cutN.mp4, N one past the highest there."""
-    have = [int(m.group(2)) for f in (out / "cuts").glob(f"{stem}-cut*.mp4") if (m := CUT.fullmatch(f.name)) and m.group(1) == stem]
+    """(N, path) of the next cut of `stem`: OUT/cuts/STEM-cutN.mp4, N one past the highest there, names matched as text.
+    A glob built from the name missed draft[1]'s cuts (the [1] read as a set of characters), so cut 1 was given again,
+    and the failed export's rollback deleted the cut already filed under it (a review's finding)."""
+    cuts = out / "cuts"
+    have = [int(m.group(2)) for f in (cuts.iterdir() if cuts.is_dir() else ()) if (m := CUT.fullmatch(f.name)) and m.group(1) == stem]
     n = max(have, default=0) + 1
-    return n, out / "cuts" / f"{stem}-cut{n}.mp4"
+    return n, cuts / f"{stem}-cut{n}.mp4"
 
 
 def hand_in_files(film):
     """A film's hand-in as it lies beside it: the film, its share copy and its sheets."""
     film = Path(film)
-    return [film, film.with_name(film.stem + "-share.mp4"), *sorted(film.parent.glob(film.stem + "-sheet*.jpg"))]
+    return [film, film.with_name(film.stem + "-share.mp4"), *sheets_of(film)]
 
 
 def publish(src, dst):
@@ -1439,12 +1482,15 @@ def cmd_export(a):
     d, entry, s, comp, out, dest = export_paths(a)
     n, cut = cut_of(out, dest.stem)
     done = {}
+    # what is already there under this cut's names is never this export's to remove, whatever went wrong in numbering
+    there = {f for f in [cut.with_name(cut.stem + ".part.mp4"), *hand_in_files(cut)] if f.exists()}
     try:
         dest = _export(a, cut, done)
     except BaseException:
         if not done.get("cut"):
             for f in [cut.with_name(cut.stem + ".part.mp4"), *hand_in_files(cut)]:
-                f.unlink(missing_ok=True)
+                if f not in there:
+                    f.unlink(missing_ok=True)
         if done.get("cut"):
             # the cut was filed and stays: a step after it failed, and an agent told no cut was made would export again
             # and file the same film as the next cut
@@ -1513,7 +1559,7 @@ def _export(a, cut=None, done=None):
         else:
             said.append(f"picture rendered once in {secs:.1f} s{waited}")
         part.replace(pic)
-        picture_note(pic).write_text(json.dumps({"files": drawn_from}), encoding="utf-8")
+        picture_note(pic).write_text(json.dumps({"files": drawn_from, "drawn": drawn_record(pic)}), encoding="utf-8")
         if stale_why and not a.again and stale_why != "no picture yet":
             said.append(f"(drawn again: {stale_why})")
     else:
@@ -1542,7 +1588,7 @@ def _export(a, cut=None, done=None):
     share, sheets = hand_in(cut)
     done["cut"] = True
     # the latest: NAME.mp4 and its hand-in made the cut just finished, all of it only now
-    for old in dest.parent.glob(dest.stem + "-sheet*.jpg"):
+    for old in sheets_of(dest):
         old.unlink()
     for f in hand_in_files(cut):
         if f.exists():
@@ -1974,18 +2020,21 @@ def _size(p):
 
 
 def _rebuilt(o):
-    """The files of output folder O that an export makes again: its own export, share copy and cuts are never among
-    them, though a film folder called NAME.picture exports NAME.picture.mp4 (a review's finding). A picture is one an
-    export drew only when the note of what it was drawn from lies beside it: `vd export -o OUT/custom.picture.mp4` is a
-    finished film with no such note, and plain clean had removed it (a review's finding)."""
-    own = {f"{o.name}.mp4".lower(), f"{o.name}-share.mp4".lower()}
+    """The files of output folder O that an export makes again: a picture only while it is the one its note recorded
+    drawing (is_drawn), so a film folder called NAME.picture's own NAME.picture.mp4, `vd export -o OUT/custom.picture.mp4`
+    and a finished film published at a former picture's name all stay (reviews' findings); a picture's note only with
+    its picture or after it; raea's part records."""
     out = []
     for pat in REBUILT:
         for f in o.glob(pat):
-            if not f.is_file() or _linked(f) or f.name.lower() in own:
+            if not f.is_file() or _linked(f):
                 continue
-            if f.name.lower().endswith(".picture.mp4") and not picture_note(f).is_file():
+            if f.name.lower().endswith(".picture.mp4") and not is_drawn(f):
                 continue
+            if f.name.lower().endswith(".picture.mp4.sources.json"):
+                pic = f.with_name(f.name[:-len(".sources.json")])
+                if os.path.lexists(pic) and not is_drawn(pic):
+                    continue
             out.append(f)
     return out
 
@@ -2053,6 +2102,11 @@ def cmd_clean(a):
             raise SystemExit("vd clean: --keep-cuts drops cuts of one film's folder at a time: name it (vd clean NAME --keep-cuts N)")
     if a.keep and a.keep_cuts is None:
         raise SystemExit("vd clean: --keep goes with --keep-cuts (plain clean never removes a cut)")
+    linked = next((q for q in (OUTROOT, *OUTROOT.parents) if _linked(q)), None)
+    if linked is not None:
+        # every file under a linked VD_OUT is reached through the link (a review's finding: a junction VD_OUT was listed)
+        raise SystemExit(f"vd clean: {linked} is a link (to {linked.resolve()}), and clean never works through a link, so nothing was looked at. "
+                         f"To clean the folder it points to, run it with VD_OUT set to that folder's own path.")
     if a.names:
         folders = [_out_folder(n) for n in a.names]
     else:
@@ -2065,12 +2119,17 @@ def cmd_clean(a):
         if wrong:
             raise SystemExit(f"vd clean: no cut {', '.join(map(str, wrong))} in {folders[0].name}/cuts (its cuts: "
                              f"{', '.join(map(str, sorted(have))) or 'none'}); nothing was removed")
-    total, freed, busy, stuck = 0, 0, [], []
+    total, freed, busy, stuck, unlisted = 0, 0, [], [], []
     for o in folders:
         plan = clean_plan(o, a.keep_cuts, keep)
         note = orphan_note(o) if a.orphans else None
         if note:
             print(f"{o.name}: {note}")
+        unknown = [f for f in o.glob("*.picture.mp4") if f.is_file() and not _linked(f) and not is_drawn(f)]
+        if unknown:
+            # drawn before 0.2.2 (no record of the draw) or a finished film with a picture's name: never removed here
+            print(f"{o.name}: left {len(unknown)} *.picture.mp4 ({sum(f.stat().st_size for f in unknown) / 2**20:,.0f} MB) with no record that an "
+                  f"export drew {'it' if len(unknown) == 1 else 'them'} (drawn before 0.2.2, or a finished film); remove any that are old pictures yourself")
         if not plan:
             continue
         here = sum(b for _, b, _ in plan)
@@ -2080,11 +2139,16 @@ def cmd_clean(a):
             print(f"  {f.relative_to(OUTROOT)}  {b / 2**20:,.1f} MB  ({why})")
         if not a.yes:
             continue
+        listed = {f for f, _, _ in plan}
         try:
             with held(o, "clean"):
-                # what goes is decided again under the lock: the folder may have changed since it was listed
+                # what goes is decided again under the lock, and only what was listed goes: a cut that finished between
+                # the list and the lock made cut 2 "older" and it went unnamed (a review's finding)
                 left = set()   # pictures that stayed keep their notes, so a later clean still knows them as drawn
                 for f, b, _ in clean_plan(o, a.keep_cuts, keep):
+                    if f not in listed:
+                        unlisted.append(str(f.relative_to(OUTROOT)))
+                        continue
                     if f.name.endswith(".picture.mp4.sources.json") and f.name[:-len(".sources.json")] in left:
                         continue
                     try:
@@ -2101,7 +2165,8 @@ def cmd_clean(a):
         print(f"\n{total / 2**20:,.0f} MB could go from {OUTROOT}. Nothing was removed: run again with --yes to remove it.")
     else:
         print(f"\nremoved {freed / 2**20:,.0f} MB from {OUTROOT}." + (" Skipped, in use: " + ", ".join(busy) if busy else "")
-              + (" Not removed, open elsewhere: " + ", ".join(stuck) if stuck else ""))
+              + (" Not removed, open elsewhere: " + ", ".join(stuck) if stuck else "")
+              + (" Not removed, not in the list above (the folder changed): " + ", ".join(unlisted) if unlisted else ""))
     return 0
 
 
@@ -2474,6 +2539,11 @@ def main(argv=None):
     s.add_argument("-o", help="output directory (default ~/.vd/out/NAME/bridge)"); s.set_defaults(fn=cmd_bridge)
     for p in sub.choices.values():
         p.add_argument("--film", help="the film folder (default: the nearest folder at or above here with score.json)")
+    if argv and argv[0] in NOT_PROVEN:
+        # said where the command is called, not only in SKILL.md, and before its arguments are read, so a call that
+        # stops on a usage error hears it too (it was said only once parsing passed: a review's finding)
+        print(f"note: vd {argv[0]} is not proven on a film yet (no accepted film was made through it; SKILL.md, \"Newer "
+              "commands\"). Prefer the older route when it does the job.", file=sys.stderr)
     a = ap.parse_args(argv)
     try:
         sys.stdout.reconfigure(line_buffering=True)   # so what is printed comes out in the order it was said, piped or not
@@ -2482,10 +2552,6 @@ def main(argv=None):
     MADE.clear()
     t0 = time.monotonic()
     code = 1
-    if a.cmd in NOT_PROVEN:
-        # said where the command runs, not only in SKILL.md: an agent that reaches for one of these hears it each time
-        print(f"note: vd {a.cmd} is not proven on a film yet (no accepted film was made through it; SKILL.md, \"Newer "
-              "commands\"). Prefer the older route when it does the job.", file=sys.stderr)
     try:
         r = a.fn(a)
         code = r if isinstance(r, int) else 0

@@ -427,6 +427,13 @@ def test_playable_fits_any_window_and_plays_the_films_whole_mix():
         html = (out_play / "index.html").read_text(encoding="utf-8")
         stage = re.search(r"#vd-stage \{\{?([^}]*)\}", html).group(1)
         assert "flex: none" in stage, ("the stage keeps its size and is only scaled", stage)
+        # scaled to the window by both sides, with no floor that crops a small pane (a 10% floor cropped any pane under
+        # 216 px, and a scale forced to 1 was not caught: a review's findings). This reads the page's source in playable.py,
+        # which the bundler rewrites; no browser runs.
+        src = Path(playable.__file__).read_text(encoding="utf-8")
+        fit = re.search(r"const s = Math\.min\(\(wrap\.clientWidth - 24\) / W, \(wrap\.clientHeight - 24\) / H\);", src)
+        floor = re.search(r"stage\.style\.transform = `scale\(\$\{Math\.max\(([\d.]+), s\)", src)
+        assert fit and floor and float(floor.group(1)) <= 0.01, ("the stage scales to fit the window, floored at no more than 1%", fit, floor)
         played = out_play / re.search(r"<audio id='vd-audio' src='([^']+)'", html).group(1)
         mix = lean.outdir(d) / "sound.wav"
         assert mix.is_file() and played.read_bytes() == mix.read_bytes(), "the page plays the mix the export lays under the picture"

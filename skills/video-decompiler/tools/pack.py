@@ -69,16 +69,28 @@ def tile_h(film):
 
 def tiles(film, start=0.0, length=None, h=None):
     """(time, picture) at FPS a second from `start`, for `length` seconds (all when None), each the frame on screen at its
-    time. ffmpeg's fps filter on its own keeps the last frame of the half second centred on each tick, up to 0.25 s late
-    (the tile labelled 31.00 s showed 31.167, the one labelled 0.00 showed 0.208); round=up keeps the last frame at or
-    before the tick."""
+    time: the last frame whose own time is at or before it, read from the file's packets. ffmpeg's fps filter picked
+    by its own rounding: half a second late centred on each tick (the tile labelled 31.00 s showed 31.167), and with
+    round=up still a frame out, and a whole tile late from a start between frames (a pack from 9.008 s showed frame 570
+    twice where 540 was on screen; a review's finding). The seek lands on the first frame wanted, as seek_to's do."""
+    import numpy as np
     from PIL import Image
+    from film_diff import clock, ffprobe
     h = h or tile_h(film)
-    cmd = ["ffmpeg", "-v", "error", "-ss", f"{start:.3f}", "-i", str(film)] + (["-t", f"{length:.3f}"] if length else []) + \
-          ["-vf", f"fps={FPS}:round=up,scale={W}:{h}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+    times = clock(film)
+    end = ffprobe(film)["duration"] if length is None else min(start + length, ffprobe(film)["duration"])
+    ticks = [start + k / FPS for k in range(int((end - start) * FPS) + 2) if start + k / FPS < end - 1e-9]
+    if not ticks:
+        return []
+    want = [max(0, int(np.searchsorted(times, t + 1e-6, side="right")) - 1) for t in ticks]
+    first, frames = want[0], sorted(set(want))
+    ss = 0.0 if first == 0 else float(times[first - 1] + times[first]) / 2      # half way back: the seek lands on `first`
+    pick = "+".join(f"eq(n\\,{f - first})" for f in frames)
+    cmd = ["ffmpeg", "-v", "error", "-ss", f"{ss:.6f}", "-i", str(film), "-vf", f"select='{pick}',scale={W}:{h}", "-fps_mode", "passthrough",
+           "-frames:v", str(len(frames)), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
     raw = subprocess.run(cmd, capture_output=True, check=True, creationflags=NO_WINDOW).stdout
-    n = len(raw) // (W * h * 3)
-    return [(start + k / FPS, Image.frombytes("RGB", (W, h), raw[k * W * h * 3:(k + 1) * W * h * 3])) for k in range(n)]
+    got = {f: Image.frombytes("RGB", (W, h), raw[k * W * h * 3:(k + 1) * W * h * 3]) for k, f in enumerate(frames) if (k + 1) * W * h * 3 <= len(raw)}
+    return [(t, got[f]) for t, f in zip(ticks, want) if f in got]
 
 
 STRIP = 24   # px: the band above each story tile that holds its time, so no stamp covers the picture
