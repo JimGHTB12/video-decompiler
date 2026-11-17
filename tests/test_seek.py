@@ -160,10 +160,31 @@ def peak_mb(cmd):
     return p.returncode, out + err, peak / 2 ** 20
 
 
+def removed(folder, wait=5.0):
+    """Remove a test's folder, waiting up to `wait` seconds for a file another process holds: on the hosted Windows
+    runners num60.mp4 was still held when the folder was removed (2 runs in 5), after every ffmpeg here had exited and
+    been waited on (most likely a virus scanner reading the new file; not confirmed). A file still held after that is a
+    real leak, and fails."""
+    import shutil
+    import time
+    end = time.monotonic() + wait
+    while True:
+        try:
+            shutil.rmtree(folder)
+            return
+        except PermissionError:
+            if time.monotonic() > end:
+                raise
+            time.sleep(0.25)
+
+
 def main():
     for t in (test_zero_rate_is_not_a_crash, test_every_tool_lands_on_frame_f, test_variable_rate, test_a_phone_clip_is_its_shown_shape):
-        with tempfile.TemporaryDirectory() as tmp:
+        tmp = tempfile.mkdtemp()
+        try:
             t(Path(tmp))
+        finally:
+            removed(tmp)
         print("ok", t.__name__)
     print("seek checks passed")
 
