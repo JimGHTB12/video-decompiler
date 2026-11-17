@@ -22,7 +22,7 @@ summed over each second, the largest taken, never overlapping), drawn by sheet.p
 order, the time and frame number on every tile. A reader at four frames a second saw a story and no motion: a stutter or
 an ease is only visible frame by frame. --ref-first and --ref-last give only the first N and last M seconds of each
 --against film, and its stretches are picked inside them. Each --against film's material is made by this same code and
-cached beside its measures (~/.vd/measures/<its hash>/reader-...). No film's name is in any file name, text or picture
+cached beside its measures (~/.vd/measures/<its hash>-sheets2/reader-...). No film's name is in any file name, text or picture
 inside the pack. vd pin gives a reference alone the same material (reader_material).
 """
 import argparse
@@ -68,11 +68,14 @@ def tile_h(film):
 
 
 def tiles(film, start=0.0, length=None, h=None):
-    """(time, picture) at FPS a second from `start`, for `length` seconds (all when None)."""
+    """(time, picture) at FPS a second from `start`, for `length` seconds (all when None), each the frame on screen at its
+    time. ffmpeg's fps filter on its own keeps the last frame of the half second centred on each tick, up to 0.25 s late
+    (the tile labelled 31.00 s showed 31.167, the one labelled 0.00 showed 0.208); round=up keeps the last frame at or
+    before the tick."""
     from PIL import Image
     h = h or tile_h(film)
     cmd = ["ffmpeg", "-v", "error", "-ss", f"{start:.3f}", "-i", str(film)] + (["-t", f"{length:.3f}"] if length else []) + \
-          ["-vf", f"fps={FPS},scale={W}:{h}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+          ["-vf", f"fps={FPS}:round=up,scale={W}:{h}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
     raw = subprocess.run(cmd, capture_output=True, check=True, creationflags=NO_WINDOW).stdout
     n = len(raw) // (W * h * 3)
     return [(start + k / FPS, Image.frombytes("RGB", (W, h), raw[k * W * h * 3:(k + 1) * W * h * 3])) for k in range(n)]
@@ -163,10 +166,18 @@ def file_hash(path):
     return h.hexdigest()[:16]
 
 
+SHEETS = 2   # bump when the sheets change, so a set cached the old way is made again (2: each story tile shows the frame at its time)
+
+
+def sheets_root(ref, cache_root=None):
+    """Where a reference's sheets are cached: beside its measures, under this version of the sheets."""
+    return Path(cache_root or Path.home() / ".vd" / "measures") / f"{file_hash(ref)}-sheets{SHEETS}"
+
+
 def ref_sheets(ref, first=None, last=None, cache_root=None, k=K):
     """The reference's story and motion sheets, made once by reader_material and kept beside its measures. Made in a
     folder of its own and moved into place whole, so a run stopped half way is never taken as made."""
-    root = Path(cache_root or Path.home() / ".vd" / "measures") / file_hash(ref)
+    root = sheets_root(ref, cache_root)
     folder = root / f"reader-{first or 'all'}-{last or 'all'}-k{k}"
     if not (folder / "story-01.jpg").exists():
         part = folder.with_name(folder.name + ".part")

@@ -267,6 +267,10 @@ def build_cues_v2(film_dir: Path, video_path: Path, pic_info: dict, out_dir: Pat
             "kind": "picture",
             "path": rel_video,
             "sha256": pic_info["sha256"],
+            # sha256 is the first video stream's, as legible-film binds a picture: beside the path with no word, a check of
+            # the file the obvious way (sha256sum) gave another number. The file's own is given too
+            "sha256_of": "the first video stream's packets (ffmpeg -map 0:v:0 -c copy -f hash -hash sha256), not the whole file; the file's own SHA-256 is file_sha256",
+            "file_sha256": sha256_file(video_path),
             "geometry": pic_info["geometry"],
             "timing": pic_info["timing"],
         },

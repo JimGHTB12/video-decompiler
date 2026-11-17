@@ -5,9 +5,13 @@ into dna.json, kit/dna.gen.ts and a REFERENCE.md to finish by TAKE-APART.md.
   python borrow.py REF.mp4 [--for REPO_DIR] [--out FILM_DIR]
 
 What it does: measures the reference (vd pin's measure), fits each move's speed profile to physics.ts's spring
-(frequency, damping) and a cubic curve, and takes the held colours. Which worked film it is like is chosen with
+(frequency, damping) and a cubic curve, and takes its colours: every ground (a full-frame colour held 0.5 s or more,
+read over the whole film four times a second, with its seconds and stretches), the accents set on them, and its holds'
+swatches, near-identical colours merged. Which worked film it is like is chosen with
 --like, never guessed. A move with no usable profile, a poor fit or a fit on the grid's edge is marked unfitted
-(`fitted: false`), never a perfect fit. It pins no targets: vd measure reads vd pin's numbers.
+(`fitted: false`), never a perfect fit. The film's spring and curve (DNA_SPRING, DNA_BEZIER) are the medians of the
+moves that fit a spring with a readable speed; with none they are null and borrow says no move was fitted, never a
+stand-in. It pins no targets: vd measure reads vd pin's numbers.
 Known answer: tests/test_new_check_faults.py plants springs on moves of 0.2 to 1.2 s and recovers them within 0.15 Hz
 and 0.06 damping, and calls an inOutCubic glide unfitted.
 """
@@ -29,6 +33,14 @@ sys.path.insert(0, str(TOOLS))
 FREQS = np.round(np.arange(0.5, 8.0001, 0.05), 2)     # Hz: physics.ts springs in the worked films run 1.5 to 5
 DAMPS = np.round(np.linspace(0.20, 1.15, 20), 2)
 FIT_MSE = 0.02    # above this the move is not a spring of this family (an inOutCubic glide fits damp 0.2 at 0.198)
+GROUND_STEP = 0.25   # seconds between the samples a film's grounds and accents are read from
+GROUND_HELD = 0.5    # seconds a full-frame colour must hold to be a ground: a shorter one is a flash or a card passing
+GROUND_COVER = 0.3   # share of the frame within 40 levels of the border's commonest colour for that colour to be the frame's ground
+NEAR = 8             # CIELAB distance (delta E) under which two colours are one: il's six off-white swatches lay within 3.1
+                     # of each other and HEX's creams within 5.2, while its red accent is 13 from its orange ground, which an
+                     # RGB distance of 40 called one colour (34 apart)
+ACCENT_CHROMA = 80   # a pixel's max - min channel at least this for it to count toward an accent
+NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 
 @functools.lru_cache(maxsize=64)
@@ -96,8 +108,81 @@ def rgb_sat(rgb):
     return 0.0 if mx <= 1e-6 else (mx - mn) / mx
 
 
-def extract_palette_and_ink(m):
-    """Aggregate hold palettes and ink-band histograms from measure.py's output."""
+def to_hex(c):
+    return "#%02x%02x%02x" % tuple(int(round(float(v))) for v in c)
+
+
+def lab(rgb):
+    """CIELAB of RGB colours (0-255, any shape ending in 3): distances in it follow what an eye tells apart."""
+    import cv2
+    a = np.asarray(rgb, np.float32)
+    return cv2.cvtColor(a.reshape(-1, 1, 3) / 255.0, cv2.COLOR_RGB2Lab).reshape(a.shape)
+
+
+def apart(a, b):
+    """How far apart two colours (RGB triples or hex) look: delta E in CIELAB."""
+    a, b = (hex_to_rgb(x) if isinstance(x, str) else x for x in (a, b))
+    return float(np.linalg.norm(lab(a) - lab(b)))
+
+
+def merge_near(items):
+    """(colour, weight, notes) merged into the heavier of any two within NEAR of each other: the weighted mean colour,
+    the summed weight and both notes; heaviest first."""
+    out = []
+    for c, w, notes in sorted(items, key=lambda x: -x[1]):
+        c = np.asarray(c, float)
+        g = next((g for g in out if apart(g["c"], c) < NEAR), None)
+        if g is None:
+            out.append({"c": c, "w": float(w), "notes": list(notes)})
+        else:
+            g["c"] = (g["c"] * g["w"] + c * w) / max(g["w"] + w, 1e-9)
+            g["w"] += float(w)
+            g["notes"] += list(notes)
+    return sorted(out, key=lambda g: -g["w"])
+
+
+def film_colours(path, duration=None):
+    """The film's grounds and accents, read from the whole film four times a second (each sample the frame on screen at
+    its time), not from its holds alone: HEX rests 1.5 s of its 35, and its holds showed two of its seven grounds.
+    A ground is a full-frame colour (the border's commonest, covering GROUND_COVER of the frame) held GROUND_HELD or
+    longer; each distinct one is kept with its seconds on screen and its stretches, near-identical ones merged. An accent
+    is a strongly coloured thing on a ground: weighed by its share of the screen over time, and never a ground."""
+    import measure
+    w, h = 160, 90
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-vf", f"fps={1 / GROUND_STEP:g}:round=up,scale={w}:{h}:flags=area",
+                          "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, creationflags=NO_WINDOW).stdout
+    frames = np.frombuffer(raw[:len(raw) - len(raw) % (w * h * 3)], np.uint8).reshape(-1, h, w, 3)
+    end = float(duration) if duration else len(frames) * GROUND_STEP
+    runs, hot = [], {}
+    for k, rgb in enumerate(frames.astype(int)):
+        g = measure.background(rgb)
+        if float(np.mean(np.abs(rgb - g).max(axis=2) <= 40)) >= GROUND_COVER:
+            if runs and runs[-1][1] == k and apart(np.mean(runs[-1][2], axis=0), g) < NEAR:
+                runs[-1][1] = k + 1
+                runs[-1][2].append(g)
+            else:
+                runs.append([k, k + 1, [g]])
+        px = rgb.reshape(-1, 3)
+        off = np.linalg.norm(lab(px) - lab(g), axis=1) >= NEAR
+        sel = px[(px.max(axis=1) - px.min(axis=1) >= ACCENT_CHROMA) & off]
+        keys = (sel // 32) @ np.array([64, 8, 1])
+        for key in np.unique(keys):
+            mine = sel[keys == key]
+            got = hot.setdefault(int(key), [0, np.zeros(3), k * GROUND_STEP])
+            got[0] += len(mine)
+            got[1] += mine.sum(axis=0)
+    held = [(np.mean(cols, axis=0), (b - a) * GROUND_STEP, [[round(a * GROUND_STEP, 2), round(min(b * GROUND_STEP, end), 2)]])
+            for a, b, cols in runs if (b - a) * GROUND_STEP >= GROUND_HELD]
+    grounds = [{"hex": to_hex(g["c"]), "seconds": round(g["w"], 2), "spans": sorted(g["notes"])} for g in merge_near(held)]
+    spots = merge_near([(s / n, n / (w * h) * GROUND_STEP, [t]) for n, s, t in hot.values()])
+    accents = [{"hex": to_hex(a["c"]), "screen_seconds": round(a["w"], 3), "first": round(min(a["notes"]), 2)} for a in spots
+               if all(apart(a["c"], g["hex"]) >= NEAR for g in grounds)]
+    return {"grounds": grounds, "accents": accents[:4]}
+
+
+def extract_palette_and_ink(m, colours=None):
+    """Aggregate hold palettes and ink-band histograms from measure.py's output, with the grounds and accents read from
+    the whole film (film_colours) when given."""
     holds = m.get("holds") or []
     weights = {}
     bands = []
@@ -111,16 +196,23 @@ def extract_palette_and_ink(m):
             bands.extend(float(b) for b in h["bands"])
         for hex_col, share in h.get("palette") or []:
             weights[hex_col] = weights.get(hex_col, 0.0) + dur * float(share)
-    ranked = sorted(weights.items(), key=lambda kv: -kv[1])
+    # near-identical colours are one swatch, weighed as a share of the time held: il's swatches were six off-whites
+    # within 16 levels of each other (weights summing to 26.6), so no other colour made the list
+    total = sum(weights.values()) or 1.0
+    ranked = [(to_hex(g["c"]), g["w"] / total) for g in merge_near([(hex_to_rgb(c), wt, []) for c, wt in weights.items()])]
     colors = [c for c, _ in ranked] if ranked else ["#121316", "#f4efe6", "#2a5bd7", "#e04f33"]
-    # the ground is the frame's border colour held longest (measure.py's background), not the largest colour cluster:
-    # a film of dark paintings on paper had its paintings' navy taken for its ground
-    grounds = {}
-    for h in holds:
-        if h.get("ground"):
-            k = tuple(v // 16 for v in hex_to_rgb(h["ground"]))
-            grounds.setdefault(k, [0.0, h["ground"]])[0] += max(0.05, float(h.get("t1", 0.0)) - float(h.get("t0", 0.0)))
-    ground = max(grounds.values())[1] if grounds else colors[0]
+    found = (colours or {}).get("grounds") or []
+    if found:   # the ground held longest over the whole film; a red end card was the longest hold of one that never rests
+        ground = found[0]["hex"]
+    else:
+        # the ground is the frame's border colour held longest (measure.py's background), not the largest colour cluster:
+        # a film of dark paintings on paper had its paintings' navy taken for its ground
+        grounds = {}
+        for h in holds:
+            if h.get("ground"):
+                k = tuple(v // 16 for v in hex_to_rgb(h["ground"]))
+                grounds.setdefault(k, [0.0, h["ground"]])[0] += max(0.05, float(h.get("t1", 0.0)) - float(h.get("t0", 0.0)))
+        ground = max(grounds.values())[1] if grounds else colors[0]
     colors = [ground] + [c for c in colors if c != ground]
     g_luma = rgb_luma(hex_to_rgb(ground))
     # Ink is the colour with highest luminance contrast against ground
@@ -131,9 +223,14 @@ def extract_palette_and_ink(m):
     # its own made a near-black teal the accent, and a colour one step from the ground counted as distinct from it
     far = lambda a, b: sum((x - y) ** 2 for x, y in zip(hex_to_rgb(a), hex_to_rgb(b))) ** 0.5 >= 48
     chroma = lambda c: max(hex_to_rgb(c)) - min(hex_to_rgb(c))
-    apart = [c for c in colors if far(c, ground) and far(c, ink)]
-    accent = max(apart, key=chroma) if apart and chroma(max(apart, key=chroma)) >= 40 else "#e04f33"
-    surface = next((c for c in colors if c not in (ground, ink, accent)), "#24262b" if g_luma <= 0.5 else "#e8e2d5")
+    # and never one of the film's grounds: those are the stage, the accent is what is set on it
+    off = [c for c in colors if far(c, ground) and far(c, ink) and all(apart(c, g["hex"]) >= NEAR for g in found)]
+    accents = (colours or {}).get("accents") or []
+    if accents:   # read over the whole film: a small chip never shows in a hold's four-colour palette (il's blue)
+        accent = accents[0]["hex"]
+    else:
+        accent = max(off, key=chroma) if off and chroma(max(off, key=chroma)) >= 40 else "#e04f33"
+    surface = next((c for c in colors if all(apart(c, x) >= NEAR for x in (ground, ink, accent))), "#24262b" if g_luma <= 0.5 else "#e8e2d5")
     band_arr = np.asarray(bands, dtype=np.float32) if bands else np.array([0.08, 0.05, 0.036], dtype=np.float32)
     return {
         "ground": ground,
@@ -141,6 +238,8 @@ def extract_palette_and_ink(m):
         "accent": accent,
         "surface": surface,
         "is_dark": bool(g_luma < 0.45),
+        "grounds": found,
+        "accents": accents,
         "swatches": [{"hex": c, "weight": round(w, 3)} for c, w in ranked[:8]],
         "ink_bands": {
             "hero_share": round(float(np.percentile(band_arr, 90)), 3),
@@ -181,7 +280,8 @@ def compile_beat_table(m, near_fb=None):
     if not event_beats:
         event_beats = [round(i * beats_total / 6.0, 2) for i in range(6)]
     cuts_beats = [snap_sec(t) for t in (m.get("cuts") or [])]
-    cues = [[f"BEAT_{i + 1}", round(b * beat_s, 4)] for i, b in enumerate(event_beats[:24])]
+    # every event is a cue, each with its time in seconds and in beats: the cues stopped after 24 (at 23.4 s of 34.9)
+    cues = [{"name": f"BEAT_{i + 1}", "s": round(b * beat_s, 4), "beat": b} for i, b in enumerate(event_beats)]
     clock = {
         "FPS": fps,
         "FB": fb,
@@ -197,6 +297,10 @@ def compile_beat_table(m, near_fb=None):
         "EVENTS": event_beats,
         "CUTS": cuts_beats,
     }
+    # the unit, and the same times in seconds beside them: a reader took END 38.125 (beats) for seconds past a 17 s film
+    sec = lambda b: round(b * beat_s, 3)
+    times.update({"UNIT": "beats", "BEAT_S": round(beat_s, 6),
+                  "SECONDS": {k: ([sec(b) for b in v] if isinstance(v, list) else sec(v)) for k, v in times.items()}})
     return clock, times, cues
 
 
@@ -252,55 +356,97 @@ def inspect_repo(repo_dir: Path):
     }
 
 
+SYNC_MARGIN = 0.1   # events must land on an onset this much more often than chance to follow the sound (measure compare's margin)
+
+# TAKE-APART.md's headings that only a reader of the film can write. borrow once filled "The world" and "The formal
+# idea" from its numbers ("Events lock to a 150.0 BPM grid" for a film whose events landed on the beat at chance)
+TO_WRITE = [
+    ("The world", "what everything on screen is made of and why that material belongs to the subject; its rules (ground, light, colour, type, what moves and how, what never appears); the ground's job. The held colours under Measured are numbers for it, not it"),
+    ("The formal idea", "the one move the whole film is built on"),
+    ("Ties", "each one: what it is, where it first appears, where it returns, what the return means"),
+    ("Hand-overs", "a row for every boundary between two moments, with its time, and what carries the eye across"),
+    ("Dynamics", "where it builds, peaks and rests, in the picture and in the loudness"),
+    ("Flat notes", "every moment where the film drops, with the time"),
+    ("Gifts", "details nobody asked for, with times"),
+    ("Words, picture, sound", "what the words carry that the picture does not, and the other way"),
+    ("Keeps and breaks", "the conventions of its kind that it keeps, and the one it breaks"),
+    ("Hardest shot", "the stretch that would cost the most to make"),
+]
+
+
+def sync_line(s):
+    """Whether the reference's events follow its sound, said against what chance gives."""
+    rate, chance = s.get("sync_rate"), s.get("sync_chance")
+    if rate is None or chance is None:
+        return "Events on a sound onset: not measured (no sound, or no onsets in it)."
+    said = ("above chance, so its events follow its sound" if rate > chance + SYNC_MARGIN else
+            f"no more than chance (within {SYNC_MARGIN} of it), so nothing here says its events follow its sound")
+    return f"Events on a sound onset (within 50 ms): {rate} of them, against {chance} by chance: {said}."
+
+
 def write_reference_md(dest: Path, ref_path: Path, dna: dict):
-    """Write REFERENCE.md, a start on the TAKE-APART.md dossier, from what borrow measured and fitted."""
+    """Write REFERENCE.md, a start on the TAKE-APART.md dossier: borrow fills the headings it measured (spine, moves,
+    measured) and leaves every heading a reader of the film must write with what to write there."""
     s = dna["summary"]
     pal = dna["palette"]
     springs = dna["springs"]
     archetype, why_arch = dna["archetype"], dna["archetype_reason"]
-    sp_default = dna["default_spring"]
-    bez_default = dna["default_bezier"]
+    clock = dna["clock"]
+    fitted = sum(1 for x in springs if x["reliable"])
+    write = lambda what, step=3: f"_To write (TAKE-APART.md, step {step}): {what}._"
     lines = [
         f"# {ref_path.stem} (decompiled by `vd borrow`)",
-        f"> The claim: {dna['duration']:.1f} s at {dna['fps']:g} fps ({s.get('events_per_10s', 0)} events/10s), moving {float(s.get('move_share') or 0):.0%} of the time.",
-        f"Post: local file `{ref_path.name}` · {dna['duration']:.1f} s · {dna['width']}x{dna['height']} at {dna['fps']:g} fps · tempo {dna['clock']['BPM']} BPM",
-        f"Kind: {('`' + archetype + '` (' + why_arch + ')') if archetype else 'to be written from the film itself (TAKE-APART.md); ' + why_arch}",
-        f"Evidence: measured every frame by `measure.py` and `space.py`; {len(springs)} move speed profiles fitted to closed-form springs and cubic-beziers.",
+        "> The claim: " + write("one sentence, checkable against the film, saying what it does that makes it hold"),
+        f"Post: local file `{ref_path.name}` · {dna['duration']:.1f} s · {dna['width']}x{dna['height']} at {dna['fps']:g} fps · "
+        "credits and the maker's words: to find (TAKE-APART.md, step 2)",
+        "Kind: " + write("what a shop would file it under") + (f" This folder was copied from the worked film `{archetype}` ({why_arch})." if archetype else f" ({why_arch})"),
+        f"Evidence: measured every frame by `measure.py` and `space.py`; {fitted} of {len(springs)} move speed profiles fitted to closed-form springs and cubic-beziers.",
         "",
         "## Spine",
+        write("its parts, its grounds and its ties on this ruler") + " Below: measure's holds and moves only.",
         "```text",
     ]
     for seg in (dna.get("segments") or [])[:16]:
         lines.append(f"{seg['t0']:6.2f}s .. {seg['t1']:6.2f}s  [{seg['kind'].upper():4s}]")
+    lines += ["```", ""]
+    for heading, what in TO_WRITE:
+        lines += [f"## {heading}", write(what), ""]
     lines += [
-        "```",
-        "",
-        "## The world",
-        f"- **Ground:** `{pal['ground']}` ({'dark' if pal['is_dark'] else 'light'} ground) · **Ink:** `{pal['ink']}` · **Accent:** `{pal['accent']}` · **Surface:** `{pal['surface']}`.",
-        f"- **Ink bands (share of frame height):** hero {pal['ink_bands']['hero_share']}, statement {pal['ink_bands']['statement_share']}, body {pal['ink_bands']['body_share']}; median occupancy {pal['ink_bands']['occupancy_median']}.",
-        f"- **Space:** scene motion {s.get('scene_move')}, sheet motion {s.get('sheet_move')}, lit middle with dark corners {s.get('dark_corners')}.",
-        "",
-        "## The formal idea",
-        f" Events lock to a {dna['clock']['BPM']} BPM grid ({dna['clock']['FB']} frames/beat at 60 fps); moves follow `spring(s, {{ freq: {sp_default['freq']}, damp: {sp_default['damp']} }})` / `bezier({', '.join(map(str, bez_default))})`.",
-        "",
         "## Moves (optical-flow spring + bezier fit)",
-        "| t0 (s) | dur (s) | spring freq (Hz) | spring damp | cubic-bezier | reliable |",
-        "|---|---|---|---|---|---|",
+        f"{fitted} of {len(springs)} moves fitted. `DNA_SPRING` and `DNA_BEZIER`: {dna['motion']}.",
+        "",
     ]
+    if springs:
+        lines += ["| t0 (s) | dur (s) | spring freq (Hz) | spring damp | cubic-bezier | reliable |", "|---|---|---|---|---|---|"]
     for mv in springs[:12]:
         lines.append(f"| {mv['t0']:.2f} | {mv['dur']:.2f} | {mv['spring']['freq']} | {mv['spring']['damp']} | `{mv['ease']}` | {mv['reliable']} |")
-    if not springs:
-        lines.append(f"| 0.00 | 0.35 | {sp_default['freq']} | {sp_default['damp']} | `{bez_default}` | default |")
+    tempo = s.get("tempo_bpm")
     lines += [
         "",
         "## Measured",
-        f"- `events_per_10s`: {s.get('events_per_10s')}",
-        f"- `median_hold_s`: {s.get('median_hold_s')}",
-        f"- `median_move_s`: {s.get('median_move_s')}",
-        f"- `sync_rate`: {s.get('sync_rate')} (chance {s.get('sync_chance')})",
+        f"- `events_per_10s`: {s.get('events_per_10s')} · `median_hold_s`: {s.get('median_hold_s')} · `median_move_s`: {s.get('median_move_s')} · moving {float(s.get('move_share') or 0):.0%} of the time",
+        "- " + sync_line(s),
+        f"- Beat clock in `kit/dna.gen.ts`: {clock['BPM']} BPM, {clock['FB']} frames a beat at 60 fps, "
+        + (f"from the tempo read in its sound ({tempo} BPM; onsets cannot tell it from half or double)." if tempo else
+           "but no tempo was read in its sound, so this clock is borrow's default, not the film's."),
+        f"- Events and cuts: {len(dna['times']['EVENTS'])} events and {len(dna['times']['CUTS'])} cuts, in `DNA_TIMES` (and `dna.json` `times`) in beats of that clock "
+        f"(one beat is {dna['times']['BEAT_S']:g} s), and in seconds in `DNA_TIMES.SECONDS`; `dna.json` `cues` names each event with both.",
+        "- Grounds (full-frame colours held 0.5 s or more, longest on screen first): "
+        + ("; ".join(f"`{g['hex']}` {g['seconds']:g} s ({', '.join(f'{a:g}-{b:g}' for a, b in g['spans'][:6])}{', ...' if len(g['spans']) > 6 else ''} s)"
+                     for g in pal.get("grounds") or []) or "none held 0.5 s over the whole film (the ground below is from its holds)") + ".",
+        "- Accents (strongly coloured things on a ground, by share of the screen over time): "
+        + (", ".join(f"`{a['hex']}` (first at {a['first']:g} s)" for a in pal.get("accents") or []) or "none found") + ".",
+        f"- Held colours: ground `{pal['ground']}` ({'dark' if pal['is_dark'] else 'light'}) · ink `{pal['ink']}` · accent `{pal['accent']}` · surface `{pal['surface']}`.",
+        f"- Ink bands (share of frame height): hero {pal['ink_bands']['hero_share']}, statement {pal['ink_bands']['statement_share']}, body {pal['ink_bands']['body_share']}; median occupancy {pal['ink_bands']['occupancy_median']}.",
+        f"- Space: scene motion {s.get('scene_move')}, sheet motion {s.get('sheet_move')}, lit middle with dark corners {s.get('dark_corners')}.",
+        "",
+        "## Not known",
+        write("what you could not see, hear or find out"),
         "",
         "## What we take and what stays theirs",
-        "Take the beat grid (`kit/times.gen.ts`), the fitted spring and bezier curves (`kit/dna.gen.ts`), the ink-band hierarchy, and the ground/ink contrast relationship. Leave all original words, marks and footage behind.",
+        write("its shape: the order of its parts, its formal idea, its hand-overs, its pace, how its words arrive, the job its ground does; "
+              "and what stays theirs: its subject, words, pictures, marks, characters, music. `kit/dna.gen.ts` holds what borrow measured: take from it "
+              "only what this dossier finds is the film's shape", step=4),
     ]
     dest.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -333,16 +479,20 @@ def compile_dna_cartridge(ref_video: Path, out_dir: Path = None, repo_dir: Path 
             "spring": sp,
             "reliable": bool(mv.get("ease_reliable", True)) and sp["fitted"],
         })
-    reliable_springs = [x["spring"] for x in springs if x["reliable"]] or [x["spring"] for x in springs if x["spring"]["fitted"]]
-    default_spring = {
-        "freq": round(float(np.median([x["freq"] for x in reliable_springs])), 2) if reliable_springs else 2.4,
-        "damp": round(float(np.median([x["damp"] for x in reliable_springs])), 2) if reliable_springs else 0.48,
-    }
-    reliable_beziers = [x["ease"] for x in springs if x["reliable"]] or [[0.2, 0.8, 0.2, 1.0]]
-    default_bezier = [round(float(np.median([b[i] for b in reliable_beziers])), 2) for i in range(4)]
+    # the film's spring and curve are the medians of its moves that fitted a spring and whose speed could be read. With
+    # none there is no spring of this film's: a fallback {2.4, 0.48} stood in here, unflagged, and a film imported it as
+    # the reference's motion (HEX fitted 0 of 4 moves, il 0 of 27)
+    reliable = [x for x in springs if x["reliable"]]
+    default_spring = {"freq": round(float(np.median([x["spring"]["freq"] for x in reliable])), 2),
+                      "damp": round(float(np.median([x["spring"]["damp"] for x in reliable])), 2)} if reliable else None
+    default_bezier = [round(float(np.median([x["ease"][i] for x in reliable])), 2) for i in range(4)] if reliable else None
+    motion = (f"the median of {len(reliable)} of {len(springs)} moves, the ones that fit a spring and whose speed could be read" if reliable else
+              "no move was fitted: " + (f"none of its {len(springs)} moves fits a spring with a speed that could be read from the picture"
+                                         if springs else "measure found no move of 0.15 to 3 s to fit")
+              + ", so there is no spring or curve of this film's to take; read its moves from the frames")
 
     # 3. Extract palette, ink bands, archetype, and beat clock
-    palette = extract_palette_and_ink(m)
+    palette = extract_palette_and_ink(m, film_colours(ref_video, m.get("duration")))
     # Which worked film this is like is chosen, not measured: on the four accepted films the measures that once picked it
     # named all four `onoma`, and Onoma and Plus One are near twins on every one of them (6.2 and 6.5 events in 10 s,
     # largest type band 0.259 and 0.257). A kind is what a film shows; these numbers are how it moves.
@@ -392,6 +542,7 @@ def compile_dna_cartridge(ref_video: Path, out_dir: Path = None, repo_dir: Path 
         "cues": cues,
         "default_spring": default_spring,
         "default_bezier": default_bezier,
+        "motion": motion,
         "springs": springs,
         "palette": palette,
         "summary": m.get("summary") or {},
@@ -404,10 +555,12 @@ def compile_dna_cartridge(ref_video: Path, out_dir: Path = None, repo_dir: Path 
         "// generated by `vd borrow`: moves fitted to springs and curves, and held colours, from " + ref_video.name,
         f"export const DNA_ARCHETYPE = {json.dumps(archetype)} as const;",
         f"export const DNA_CLOCK = {json.dumps(clock)} as const;",
-        f"export const DNA_SPRING = {json.dumps(default_spring)} as const;",
-        f"export const DNA_BEZIER = {json.dumps(default_bezier)} as [number, number, number, number];",
+        f"// DNA_SPRING and DNA_BEZIER: {motion}",
+        f"export const DNA_SPRING = {json.dumps(default_spring)} as const;" if default_spring else "export const DNA_SPRING = null;",
+        f"export const DNA_BEZIER = {json.dumps(default_bezier)} as [number, number, number, number];" if default_bezier else "export const DNA_BEZIER = null;",
         f"export const DNA_PALETTE = {json.dumps(palette)} as const;",
         f"export const DNA_MOVES = {json.dumps(springs)} as const;",
+        f"// DNA_TIMES: in beats of DNA_CLOCK (one beat is {times['BEAT_S']:g} s); DNA_TIMES.SECONDS holds the same times in seconds",
         f"export const DNA_TIMES = {json.dumps(times)} as const;",
         f"export const DNA_REPO = {json.dumps(repo_info)} as const;",
     ]
@@ -436,18 +589,24 @@ def main(argv=None):
         k=a.k,
         like=a.like,
     )
+    say(Path(a.ref), out_dir, dna)
+    print(out_dir)
+
+
+def say(ref, out_dir, dna):
+    """What borrow read and wrote, for borrow.py and for vd borrow alike: through vd.py it once printed only the folder."""
     sp = dna["default_spring"]
     pal = dna["palette"]
-    print(f"fitted {Path(a.ref).name} -> {out_dir}")
+    print(f"fitted {Path(ref).name} -> {out_dir}")
     print(f"  kind: {dna['archetype'] or '-'} ({dna['archetype_reason']})")
     print(f"  clock: {dna['clock']['BPM']} BPM ({dna['clock']['FB']} frames/beat at {dna['clock']['FPS']} fps), {len(dna['times']['EVENTS'])} snapped events")
-    print(f"  spring fit: freq {sp['freq']} Hz, damp {sp['damp']}; bezier {dna['default_bezier']} ({sum(1 for x in dna['springs'] if x['spring']['fitted'])} of {len(dna['springs'])} moves fitted)")
+    print(f"  spring fit: freq {sp['freq']} Hz, damp {sp['damp']}; bezier {dna['default_bezier']} ({dna['motion']})" if sp else f"  spring fit: {dna['motion']}")
+    print(f"  grounds: {', '.join(g['hex'] + ' ' + format(g['seconds'], 'g') + ' s' for g in pal['grounds']) or 'none held 0.5 s'}")
     print(f"  palette: ground {pal['ground']}, ink {pal['ink']}, accent {pal['accent']}, hero band {pal['ink_bands']['hero_share']}")
     if dna.get("repo"):
         r = dna["repo"]
         print(f"  repo cast: {r['name']} ({r['total_code_files']} code files, {r['commits']} commits) — \"{r['tagline']}\"")
-    print(f"  wrote: {out_dir / 'dna.json'}, {out_dir / 'kit' / 'dna.gen.ts'}, {out_dir / 'REFERENCE.md'}")
-    print(out_dir)
+    print(f"  wrote: {out_dir / 'dna.json'}, {out_dir / 'kit' / 'dna.gen.ts'}, {out_dir / 'REFERENCE.md'} (to finish by TAKE-APART.md)")
 
 
 if __name__ == "__main__":

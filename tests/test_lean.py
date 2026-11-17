@@ -420,6 +420,195 @@ def test_every_command_ends_on_the_path_it_made():
         assert "made_it(" in body, f"{cmd} doesn't say what it made"
 
 
+def _clean(*args):
+    import io
+    import contextlib
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        code = lean.main(["clean", *args])
+    return code, out.getvalue()
+
+
+def _out_root():
+    root = Path(tempfile.mkdtemp())
+    keep, lean.OUTROOT = lean.OUTROOT, root / "out"
+    lean.OUTROOT.mkdir()
+    return root, keep
+
+
+def _refused(*args):
+    try:
+        _clean(*args)
+    except SystemExit:
+        return True
+    return False
+
+
+def test_clean_lists_first_and_removes_only_what_is_made_again():
+    # ~/.vd/out grew without end (13 GB in 107 folders on the laptop these films were made on): vd clean lists what an
+    # export makes again, removes it only with --yes, and never a finished cut, a share copy, a sheet or a note
+    root, keep = _out_root()
+    try:
+        film = root / "film"
+        film.mkdir()
+        o = lean.OUTROOT / "f"
+        (o / "cuts").mkdir(parents=True)
+        (o / "sub").mkdir()
+        (o / "frames").mkdir()
+        (o / lean.OWNER).write_text(str(film) + "\n", encoding="utf-8")
+        rebuilt = ["f.main.film.picture.mp4", "f.main.film.picture.mp4.sources.json", "f.main.film.picture.part.render.json"]
+        # a finished film in sub/ (Linden's linden-sub.mp4 is one), frames nothing remakes, and what vd sound writes
+        # without the lock all stay: plain clean had removed them (a review's finding)
+        kept = ["f.mp4", "f-share.mp4", "scan.txt", "sound.wav", "sound-raw.wav", "GAP.md", "pack-1-KEY.txt",
+                "sub/f-sub.mp4", "frames/frame-00001.png", "look.jpg.render.json"]
+        cuts = [f"cuts/{stem}-cut{n}{tail}" for stem in ("f", "g") for n in (1, 2, 10) for tail in (".mp4", "-share.mp4", "-sheet_000.jpg")]
+        for rel in rebuilt + kept + cuts:
+            (o / rel).write_bytes(b"x" * 1000)
+        code, said = _clean()
+        assert code == 0 and all((o / r).exists() for r in rebuilt + kept + cuts), "without --yes nothing goes"
+        assert "f.main.film.picture.mp4" in said and "-cut" not in said, said
+        _clean("--yes")
+        assert not any((o / r).exists() for r in rebuilt), "what is made again goes"
+        assert all((o / r).exists() for r in kept + cuts), "cuts, exports, scans, the mix and notes stay"
+        # cuts are dropped one named folder at a time, and --keep goes with --keep-cuts and names a cut that is there
+        assert _refused("--keep-cuts", "2", "--yes"), "--keep-cuts across every folder"
+        (lean.OUTROOT / "g2").mkdir()
+        assert _refused("f", "g2", "--keep-cuts", "2", "--yes"), "--keep-cuts across two named folders"
+        (o / "cuts" / "f-cut99.mp4").mkdir()   # a folder named like a cut is no cut to keep
+        assert _refused("f", "--keep-cuts", "1", "--keep", "99", "--yes"), "--keep of a folder named like a cut"
+        (o / "cuts" / "f-cut99.mp4").rmdir()
+        assert _refused("f", "--keep", "1", "--yes"), "--keep without --keep-cuts"
+        assert _refused("f", "--keep-cuts", "1", "--keep", "20", "--yes"), "--keep of a cut that is not there"
+        for bad in ("0", "-1"):
+            assert _refused("f", "--keep-cuts", bad, "--yes"), f"--keep-cuts {bad}"
+        assert all((o / r).exists() for r in cuts), "a refused run removes nothing"
+        # --keep-cuts 2 keeps each film name's two newest: 2 and 10 of f and of g (cut 1's files are not cut 10's)
+        _clean("f", "--keep-cuts", "2", "--yes")
+        for stem in ("f", "g"):
+            assert not any((o / f"cuts/{stem}-cut1{t}").exists() for t in (".mp4", "-share.mp4", "-sheet_000.jpg")), stem
+            assert all((o / f"cuts/{stem}-cut{n}{t}").exists() for n in (2, 10) for t in (".mp4", "-share.mp4", "-sheet_000.jpg")), stem
+        # --keep protects a cut whatever its age
+        (o / "cuts/f-cut1.mp4").write_bytes(b"accepted")
+        _clean("f", "--keep-cuts", "1", "--keep", "1", "--yes")
+        assert (o / "cuts/f-cut1.mp4").exists() and (o / "cuts/f-cut10.mp4").exists() and not (o / "cuts/f-cut2.mp4").exists()
+        # a folder an export holds is skipped, not cleared under it
+        (o / "f.main.film.picture.mp4").write_bytes(b"x")
+        with lean.held(o, "export"):
+            code, said = _clean("--yes")
+            assert (o / "f.main.film.picture.mp4").exists() and "in use" in said, said
+    finally:
+        lean.OUTROOT = keep
+
+
+def test_clean_matches_names_as_text_and_keeps_a_films_own_export():
+    # broke: a cut's files were found with a glob built from the film's name, so film[1]'s old cut took film1's only
+    # cut; and a film folder called x.picture exports x.picture.mp4, which matched the pattern of what is made again
+    root, keep = _out_root()
+    try:
+        o = lean.OUTROOT / "f"
+        (o / "cuts").mkdir(parents=True)
+        q = __import__("os").name != "nt"   # Windows does not allow ? in a file name; [ it does
+        for name in ("film[1]-cut1.mp4", "film[1]-cut2.mp4", "film1-cut1.mp4") + (("film?-cut1.mp4", "film?-cut2.mp4") if q else ()):
+            (o / "cuts" / name).write_bytes(b"film")
+        _clean("f", "--keep-cuts", "1", "--yes")
+        assert (o / "cuts/film1-cut1.mp4").exists(), "film1's only cut stays"
+        assert not (o / "cuts/film[1]-cut1.mp4").exists() and (o / "cuts/film[1]-cut2.mp4").exists()
+        if q:
+            assert not (o / "cuts/film?-cut1.mp4").exists() and (o / "cuts/film?-cut2.mp4").exists()
+        p = lean.OUTROOT / "x.picture"
+        p.mkdir()
+        (p / "x.picture.mp4").write_bytes(b"the export")
+        (p / "x.picture-share.mp4").write_bytes(b"its share copy")
+        (p / "x.picture.main.film.picture.mp4").write_bytes(b"made again")
+        _clean("--yes")
+        assert (p / "x.picture.mp4").exists() and (p / "x.picture-share.mp4").exists(), "the film's own export stays"
+        assert not (p / "x.picture.main.film.picture.mp4").exists()
+    finally:
+        lean.OUTROOT = keep
+
+
+def test_clean_never_reaches_outside_its_folder():
+    # broke: `vd clean ../outside --yes` cleaned a folder beside VD_OUT, and a linked folder took it anywhere
+    import os
+    import subprocess
+    root, keep = _out_root()
+    try:
+        outside = root / "outside"
+        outside.mkdir()
+        (outside / "film.main.film.picture.mp4").write_bytes(b"precious")
+        for name in ("../outside", str(outside), "..", "a/b"):
+            assert _refused(name, "--yes"), f"{name} was taken"
+        link = lean.OUTROOT / "linked"
+        if os.name == "nt":
+            subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(outside)], capture_output=True, check=True)
+        else:
+            os.symlink(outside, link)
+        _clean("--yes")
+        assert _refused("linked", "--yes"), "a linked folder named is refused"
+        assert (outside / "film.main.film.picture.mp4").exists(), "nothing through a link"
+    finally:
+        lean.OUTROOT = keep
+
+
+def test_clean_orphans_are_named_never_removed():
+    # broke: --orphans removed whole folders whose film folder read as gone: an unplugged drive, a moved project, a
+    # film saved as .MOV or .MP4 (not matched on Linux), and blind-read and evolve keys that nothing else holds
+    root, keep = _out_root()
+    try:
+        o = lean.OUTROOT / "gone"
+        (o / "cuts").mkdir(parents=True)
+        (o / lean.OWNER).write_text(str(root / "no-such-film") + "\n", encoding="utf-8")
+        held_things = ["final.MP4", "take.mov", "pack-1-KEY.txt", "evolve-1-KEY.txt", "sound.wav", "cuts/gone-cut1.mp4"]
+        for rel in held_things:
+            (o / rel).write_bytes(b"keep me")
+        (o / "gone.main.film.picture.mp4").write_bytes(b"made again")
+        code, said = _clean("--orphans", "--yes")
+        assert "no-such-film is not there" in said, said
+        assert all((o / r).exists() for r in held_things), "an orphan folder keeps everything but what is made again"
+        assert not (o / "gone.main.film.picture.mp4").exists()
+    finally:
+        lean.OUTROOT = keep
+
+
+def test_clean_skips_a_file_open_elsewhere_and_goes_on():
+    # broke: a picture open in a player on Windows stopped clean with a traceback, and later folders were not cleaned
+    import os
+    if os.name != "nt":
+        return   # elsewhere an open file can be removed
+    root, keep = _out_root()
+    try:
+        a, b = lean.OUTROOT / "a", lean.OUTROOT / "b"
+        a.mkdir()
+        b.mkdir()
+        (a / "a.main.film.picture.mp4").write_bytes(b"open")
+        (b / "b.main.film.picture.mp4").write_bytes(b"closed")
+        with open(a / "a.main.film.picture.mp4", "rb"):
+            code, said = _clean("--yes")
+        assert code == 0 and "open elsewhere" in said and not (b / "b.main.film.picture.mp4").exists(), said
+    finally:
+        lean.OUTROOT = keep
+
+
+def test_not_proven_commands_say_so_where_they_run():
+    # the newer commands were quarantined in prose only: each now says so on every run, and the list in the code is the
+    # list SKILL.md marks "not proven", so the two cannot drift apart
+    import re
+    import subprocess
+    skill = (TOOLS.parent / "SKILL.md").read_text(encoding="utf-8")
+    marked = set()
+    for line in skill.splitlines():
+        if re.match(r"\|\s*`vd ", line) and "| not proven" in line:
+            marked |= set(re.findall(r"`vd (\w+)", line.split("|")[1]))
+    assert marked == lean.NOT_PROVEN, (marked, lean.NOT_PROVEN)
+    with tempfile.TemporaryDirectory() as tmp:
+        p = subprocess.run([sys.executable, "-X", "utf8", str(TOOLS / "vd.py"), "foley", "--film", tmp], capture_output=True,
+                           text=True, encoding="utf-8")
+        assert "vd foley is not proven on a film yet" in p.stderr, p.stderr
+        p = subprocess.run([sys.executable, "-X", "utf8", str(TOOLS / "vd.py"), "clean"], capture_output=True, text=True,
+                           encoding="utf-8", env={**__import__("os").environ, "VD_OUT": tmp})
+        assert "not proven" not in p.stderr, "a proven command says nothing"
+
+
 def test_steal_still_runs_as_borrow():
     # 0.2.0 called vd borrow vd steal: a person's `vd steal` still runs, through the front door, and says the new name
     import subprocess

@@ -334,21 +334,23 @@ def write_wav(path: Path, mix: np.ndarray):
 
 
 def blend_into_sound_wav(sound_wav: Path, foley_mix: np.ndarray, foley_gain_db: float = -9.5):
-    """Blend stereo `foley_mix` into an existing `media/sound.wav` and re-level to -15.0 LUFS / true peak <= -2.2 dBTP."""
+    """Blend stereo `foley_mix` into an existing `media/sound.wav` and re-level it toward -15.0 LUFS, by at most 6 dB and
+    keeping its true peak at -2.2 dBTP or under, so a quiet mix ends short of -15. Returns the written file's measured
+    (LUFS, dBTP), or None when nothing was written."""
     import os
     import shutil
     import subprocess
     import lean
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg or not sound_wav.is_file():
-        return False
+        return None
     no_win = 0x08000000 if os.name == "nt" else 0
     p = subprocess.run(
         [ffmpeg, "-v", "error", "-nostdin", "-i", str(sound_wav), "-ac", "2", "-ar", str(SR), "-f", "f32le", "-"],
         capture_output=True, creationflags=no_win,
     )
     if p.returncode != 0 or not p.stdout:
-        return False
+        return None
     base = np.frombuffer(p.stdout, dtype="<f4").reshape(-1, 2).copy()
     n = min(len(base), len(foley_mix))
     gain = 10.0 ** (foley_gain_db / 20.0)
@@ -371,7 +373,7 @@ def blend_into_sound_wav(sound_wav: Path, foley_mix: np.ndarray, foley_gain_db: 
         tmp_wav.replace(sound_wav)
     finally:
         tmp_wav.unlink(missing_ok=True)
-    return True
+    return lean.loudness(sound_wav)     # what was written, measured: the note said -15 LUFS of a file at -24.7
 
 
 def run_foley(film_dir: Path, out_wav: Path = None, out_json: Path = None, mix_into_sound: bool = False):
@@ -394,8 +396,13 @@ def run_foley(film_dir: Path, out_wav: Path = None, out_json: Path = None, mix_i
     write_wav(wav_path, mix)
     mixed_note = ""
     if mix_into_sound and (film_dir / "media" / "sound.wav").is_file():
-        if blend_into_sound_wav(film_dir / "media" / "sound.wav", mix):
-            mixed_note = "; blended into media/sound.wav (-15 LUFS)"
+        got = blend_into_sound_wav(film_dir / "media" / "sound.wav", mix)
+        if got and got[0] is not None:
+            lufs, tp = float(got[0]), float(got[1])
+            mixed_note = (f"; blended into media/sound.wav, which now measures {lufs:.1f} LUFS, true peak {tp:.1f} dBTP"
+                          + (" (short of the -15 aimed at: the level is raised at most 6 dB and its true peak kept at -2.2 dBTP)" if lufs < -16 else ""))
+        elif got:
+            mixed_note = "; blended into media/sound.wav, whose level could not be measured"
     mono = mix.mean(axis=1) if len(mix) else np.zeros(1, dtype=np.float32)
     rms_db = 20.0 * math.log10(float(np.sqrt(np.mean(mono ** 2))) + 1e-9)
     peak_db = 20.0 * math.log10(float(np.max(np.abs(mix))) + 1e-9) if len(mix) else -90.0
@@ -412,7 +419,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--film", help="film folder (default: current directory)")
     ap.add_argument("-o", dest="out", help="output wav path (default: FILM/media/foley.wav)")
-    ap.add_argument("--telemetry", help="telemetry JSON path (default: FILM/~/.vd/out/NAME/telemetry.gen.json)")
+    ap.add_argument("--telemetry", help="telemetry JSON path (default: ~/.vd/out/NAME/telemetry.gen.json)")
     a = ap.parse_args(argv)
     d = Path(a.film).resolve() if a.film else Path.cwd().resolve()
     wav_path, tel_path, summary = run_foley(d, Path(a.out) if a.out else None, Path(a.telemetry) if a.telemetry else None)

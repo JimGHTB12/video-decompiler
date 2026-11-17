@@ -13,6 +13,8 @@ the same boundaries within 0.6 s, but one of them ran 1.3 to 3.9 s late wherever
 - Per hold: how much of the frame is drawn (occupancy), how busy it is (detail), its palette, and its ink bands, the
   runs of rows with drawn pixels. The tallest band is the biggest element's height, such as a punch word's.
 - Sound: onsets, a tempo if there is one, and which events land on an onset, against what chance gives.
+- An encoder's keyframe in a low-bitrate copy shifts the whole picture a little in one frame: such a change (on one of
+  the file's keyframes, no more than PULSE, the picture still on both sides) is not counted as a move or an event.
 
 A move's easing is read from how much the picture changes. That stops following speed once a thing moves further in a
 frame than its own size (a small cursor or icon, fast), or across fine texture. Such a move is kept with
@@ -53,6 +55,7 @@ MOVE_FIT = 3.0     # seconds: moves up to this long get an easing fit; longer on
 SYNC = 0.05        # seconds: an event this close to an onset lands on it
 LINEAR = 0.75      # at a move's fastest frames, change over two frames against the two single-frame changes added up:
                    # 1.0 while change follows speed, 0.5 once a thing moves further in a frame than its size
+PULSE = 2.0        # a lone change no bigger than this on one of the file's keyframes, still on both sides, is the encoder's
 
 
 def probe(path):
@@ -91,9 +94,10 @@ def analysed_frame(path, fps, k):
 
 
 LOOK_W, LOOK_H = 960, 540  # holds are looked at this size: at AW x AH a 3 px gap between headline lines vanishes
-VERSION = 9               # bump when a measure changes, so compares never mix measurements made two ways (5: the summary
+VERSION = 10              # bump when a measure changes, so compares never mix measurements made two ways (5: the summary
                           # says how the film moves, as a scene or as a sheet being slid, read by space.py. 6: and in how
-                          # many of its frames the middle is lit and all four corners are darker. 7: a beat-grid fit; 8: tempo_map's beat-grid fit, which reads Stet as 150, not 75; 9: each hold's ground, its border's commonest colour)
+                          # many of its frames the middle is lit and all four corners are darker. 7: a beat-grid fit; 8: tempo_map's beat-grid fit, which reads Stet as 150, not 75; 9: each hold's ground, its border's commonest colour;
+                          # 10: a keyframe's compression pulse over a still picture is no change, quiet_keyframes)
 DARKER = 0.9              # a corner is darker than the middle when it gives off less than nine tenths of its light
 LIT = 0.02                # and a middle this dark isn't lit at all: a black frame is not a lit middle
 
@@ -152,6 +156,36 @@ def look(rgb):
     ground = "#%02x%02x%02x" % tuple(int(round(v)) for v in background(rgb))
     return {"occupancy": round(float(mask.mean()), 3), "detail": round(float(cv2.Canny(gray, 60, 160).mean() / 255), 4), "ground": ground,
             "bands": [round(b, 3) for b in sorted(bands, reverse=True)[:6]], "largest_band": round(max(bands), 3) if bands else 0.0, "palette": palette}
+
+
+def keyframe_times(path):
+    """The presentation times of the file's keyframes, read from its packets (nothing decoded)."""
+    p = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time,flags", "-of", "csv=p=0", str(path)],
+                       capture_output=True, text=True, creationflags=NO_WINDOW)
+    out = []
+    for line in p.stdout.splitlines():
+        t, _, flags = line.partition(",")
+        try:
+            if "K" in flags:
+                out.append(float(t))
+        except ValueError:     # a packet with no time
+            pass
+    return sorted(out)
+
+
+def quiet_keyframes(energy, keys, first, fps):
+    """Take the encoder's pulses out of the change curve: at a keyframe a low-bitrate copy resets its compression and the
+    whole picture shifts a little in one frame. il's copy, a keyframe every 3.000 s, changed 0.39 to 0.76 in that frame
+    over a still picture (0.0 to 0.32 either side), and each was counted as a move and an event. Such a frame (a
+    keyframe, its change no more than PULSE, still on both sides) takes its neighbours' change. A cut is over 12, and a
+    real change between keyframes is left as it is. Returns the frames quieted."""
+    quieted = []
+    for k in keys:
+        i = int(round((k - first) * fps))
+        if 0 < i < len(energy) - 1 and MOVE < energy[i] <= PULSE and energy[i - 1] <= MOVE and energy[i + 1] <= MOVE:
+            energy[i] = max(energy[i - 1], energy[i + 1])
+            quieted.append(i)
+    return quieted
 
 
 def segments(energy, fps):
@@ -313,7 +347,8 @@ def shift_times(r, dt):
         r["sound"]["onsets"] = [round(t + dt, 3) for t in r["sound"]["onsets"]]
 
 
-def measure(path, out):
+def measure(path, out, keys=None):
+    """keys: the keyframe times on this file's clock, when they are not its own (a window cut from a longer file)."""
     info = probe(path)
     fps = min(info["fps"], FPS_CAP)
     times = clock(path)
@@ -325,6 +360,7 @@ def measure(path, out):
         energy2.append(0.0 if prev2 is None else float(np.abs(g - prev2).mean()))  # change over two frames, for follows_speed
         prev2, prev = prev, g
     energy, energy2 = np.array(energy), np.array(energy2)
+    quiet_keyframes(energy, keyframe_times(path) if keys is None else keys, float(times[0]) if len(times) else 0.0, fps)
     cut_frames = find_cuts(energy)
     segs = segments(energy, fps)
     events = []
@@ -658,7 +694,9 @@ def main():
         if got < wanted - 0.5:  # ffmpeg can end a cut early, exit 0, and leave a short copy: the same half second check_decode allows
             raise SystemExit(f"the window cut from {video} has {got:.2f} s of pictures for the {wanted:.2f} s asked for: the file ends early or is damaged. Nothing was written. "
                              "If the file plays, make a clean copy first: ffmpeg -i IN -c:v libx264 -crf 12 -c:a aac OUT.mp4")
-        result = measure(Path(tmp) / "window.mp4", Path(args.out))
+        # the copy has keyframes of its own; the source's pulses are in its pictures, at the source's keyframes
+        window_keys = [k - at for k in keyframe_times(video) if at <= k < end] + keyframe_times(Path(tmp) / "window.mp4")
+        result = measure(Path(tmp) / "window.mp4", Path(args.out), keys=sorted(window_keys))
     shift_times(result, offset)
     # the record describes the file measured and the stretch of it, not the temporary copy
     result.update({"video": str(video), "window": [round(offset, 3), round(end, 3)], "window_seconds": result["duration"], "film_seconds": whole["duration"], "energy_t0": round(offset, 6)})

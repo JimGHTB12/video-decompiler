@@ -119,6 +119,21 @@ def test_a_lineup_of_four_films_under_dealt_letters():
             assert "up to 3" in str(e), e
 
 
+def test_each_story_tile_shows_the_frame_at_its_label():
+    # broke: ffmpeg's fps filter keeps the last frame of each half second centred on a tick, so the tile labelled 31.00 s
+    # showed the frame at 31.167 (and 0.00 showed 0.208): a cut read off a story tile was read in the wrong shot
+    import numpy as np
+    with tempfile.TemporaryDirectory() as tmp:
+        clip = Path(tmp) / "count.mp4"
+        frames = np.stack([np.full((36, 64), 3 * i, np.uint8) for i in range(72)])        # 3 s at 24 fps, frame i at grey 3i
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "gray", "-s", "64x36", "-r", "24", "-i", "-",
+                        "-c:v", "libx264", "-qp", "0", "-pix_fmt", "yuv444p", str(clip)], input=frames.tobytes(), check=True)
+        for start in (0.0, 0.5):
+            for t, im in pack.tiles(clip, start=start):
+                shown = round(float(np.asarray(im.convert("L")).mean()) / 3)
+                assert shown == int(t * 24 + 1e-6), f"the tile labelled {t:.2f} s shows the frame at {shown / 24:.3f} s"
+
+
 def test_ours_alone_has_ten_stretches_and_no_lineup_without_against():
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)

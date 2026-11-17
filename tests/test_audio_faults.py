@@ -3,7 +3,9 @@
 
 Tempo: click tracks at 120 and at 100 beats a minute, with no tempo given, are read to within one beat a minute and
 their first beat to within 15 ms; a track with only two clicks has no grid, and `vd audio --tempo-map` refuses it and
-leaves the film's clock as it was, instead of writing a made-up tempo into it. Voice: a voice-like sound passes every
+leaves the film's clock as it was, instead of writing a made-up tempo into it. Clicks speeding up from 112 to 124 beats a
+minute are reported stretch by stretch, rising, and refused for sliding more than 40 ms off one steady grid; a tempo
+given outside 60 to 200 is told its half or double, not a crash. Voice: a voice-like sound passes every
 step; the same sound with a guard of 0 dB has a step refused and named; silence is refused, not levelled; a file that
 is not sound, and an output that is the input, stop with a message. Needs ffmpeg.
 
@@ -281,6 +283,54 @@ def test_a_mapped_track_becomes_the_films_beat():
             write_wav(f, x)
             r, _ = quiet(lean.main, ["audio", str(f), "--tempo-map", "--film", str(film)])
             assert isinstance(r, SystemExit) and lean.score_of(film)["music"] == m, (name, r)
+
+def accelerating(path, bpm0, bpm1, seconds=28.0, first=0.25):
+    """A kick on every beat of a tempo that rises evenly from bpm0 to bpm1, like a band speeding up, and a softer one
+    between beats (a 1906 ragtime record read 112 BPM at its start and 124 at its end)."""
+    x = np.zeros(int(seconds * SR))
+    th = np.arange(int(0.08 * SR)) / SR
+    kick = 0.5 * np.sin(2 * np.pi * 95.0 * th * (1 + 0.8 * np.exp(-th * 40))) * np.exp(-th * 28)
+    t = first
+    while t + 0.6 < seconds:
+        period = 60.0 / (bpm0 + (bpm1 - bpm0) * t / seconds)
+        for at, level in ((t, 1.0), (t + period / 2, 0.4)):
+            i = int(round(at * SR))
+            x[i:i + len(kick)] += level * kick
+        t += period
+    write_wav(path, x)
+
+
+def test_a_track_that_speeds_up_is_reported_and_refused_and_a_tempo_out_of_range_is_told():
+    # broke: a band record that speeds up about 10% was fitted to one tempo and mapped, its drift unseen (each half was
+    # fitted within 1.5% of the whole), and --bpm 232 (a valid eighth-note tempo) crashed the fit with an IndexError
+    with tempfile.TemporaryDirectory() as tmp:
+        steady, faster = Path(tmp) / "steady.wav", Path(tmp) / "faster.wav"
+        clicks(steady, 120.0, seconds=28.0)
+        accelerating(faster, 112.0, 124.0)
+        res, _ = tempo_map.analyse_file(steady)
+        assert res["drift_ms"] is not None and res["drift_ms"] < 5 and all(abs(s["bpm"] - 120) < 1 for s in res["stretches"]), (res["drift_ms"], res["stretches"])
+        res, _ = tempo_map.analyse_file(faster, bpm=118)
+        st = res["stretches"]
+        assert len(st) >= 3 and st[-1]["bpm"] - st[0]["bpm"] >= 5, ("each stretch's tempo is reported, and it rises", st)
+        assert res["drift_ms"] > tempo_map.DRIFT_MAX_MS, res["drift_ms"]
+        film = Path(tmp) / "f"
+        quiet(lean.main, ["new", str(film), "--like", "linden"])
+        before = (film / "score.json").read_bytes()
+        r, _ = quiet(lean.main, ["audio", str(faster), "--tempo-map", "--bpm", "118", "--film", str(film)])
+        said = str(getattr(r, "code", r))
+        assert isinstance(r, SystemExit) and "steady" in said and f"{res['drift_ms']:.0f} ms" in said and "BPM" in said, said
+        assert (film / "score.json").read_bytes() == before, "a refused track changed score.json"
+        # a tempo outside what the fit reads is told, with the one to give, not a crash
+        try:
+            tempo_map.analyse_file(steady, bpm=232)
+            raise AssertionError("--bpm 232 was taken")
+        except ValueError as e:
+            assert "116" in str(e) and "200" in str(e), e
+        r, _ = quiet(tempo_map.main, [str(steady), "--bpm", "232"])
+        assert isinstance(r, SystemExit) and "116" in str(r.code), r
+        r, _ = quiet(lean.main, ["audio", str(steady), "--tempo-map", "--bpm", "232", "--film", str(film)])
+        assert isinstance(r, SystemExit) and "116" in str(r.code) and (film / "score.json").read_bytes() == before, r
+
 
 def test_a_drop_lands_on_the_beat_named():
     with tempfile.TemporaryDirectory() as tmp:

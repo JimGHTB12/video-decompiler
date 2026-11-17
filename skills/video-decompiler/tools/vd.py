@@ -203,7 +203,7 @@ def main(argv=None):
     for name, what in (("new", "a film folder that starts from a working film"), ("look", "many moments as one picture"), ("sound", "the sound with no picture"),
                        ("render", "render seconds A..B only"), ("export", "the finished film, scanned"), ("scan", "pops, holds and level of a finished film"),
                        ("pack", "a blind side-by-side pack for readers"), ("measure", "the gap table"), ("pin", "a reference's numbers into score.json"),
-                       ("profile", "minutes by class for the session"), ("borrow", "not proven: a reference's fitted moves and colours"),
+                       ("profile", "minutes by class for the session"), ("clean", "what can go from ~/.vd/out; --yes removes it"), ("borrow", "not proven: a reference's fitted moves and colours"),
                        ("capture", "not proven: a repository's counts or a command's output, as a plane"), ("launch", "not proven: a copy of stet with a repository's counts beside it"),
                        ("foley", "not proven: a sound track made by rule from the film's code"), ("evolve", "not proven: four world sketches as a blind line-up"),
                        ("playable", "not proven: a browser page that imitates the film"), ("audio", "not proven: clean a voice, measure a track, draw its sound"),

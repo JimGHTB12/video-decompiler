@@ -13,6 +13,12 @@ An agent cannot watch a frame or hear a mix, and it grades its own work kindly. 
 
 Click a film to watch it with its sound: a 720p copy of the cut that was accepted (Plus One's sixth, Stet's tenth, Onoma's fourth, Linden's fifth). The films themselves are 1920 by 1080 at 60 frames a second. [The record behind this page](docs/EVIDENCE.md) says who made what, what was tested, and what nobody has checked.
 
+### From one paragraph, with nobody stepping in
+
+| | |
+|---|---|
+| [![Larder: swap a dish and the shopping list rewrites itself](docs/media/test3.gif)](docs/media/test3.mp4) | A fresh agent was given the skill, a studio film to hold its own against, four screens of real apps of the kind, and only this:<br><br>*"Make me a launch film for Larder, held against the studio film in the material folder. Larder is a meal-planning app for a household: the week's seven dinners sit on one page; you open a day and swap the dish, and the shopping list rewrites itself; at the end you send the list to whoever is doing the shop. Larder is made up, so invent its interface and its names, but nothing a viewer would take for a real company's fact. I want it to look like a real, finished product, with food you can see. 30 to 40 seconds, 1920 by 1080, music and no voice."*<br><br>This is what it made in 75 minutes, with an earlier version of the skill than this one (the third of six such tests), through the skill's own blind readers and fixes. Both readers still ranked it below the accepted film beside it; of this one and a later test, the person said they were "close to the level of the others". The record of all six such tests is in [EVIDENCE](docs/EVIDENCE.md#starting-cold). |
+
 Four films for four made-up products. Every frame is drawn and every sound is placed by code, rendered on a laptop with [raea](https://raea.io), a GPU render engine; two of the films are built on museum pictures, and one plays recorded instruments. Each was accepted by the person it was made for. All four were made on one day, 12 November 2026, with tools and a kit built in the weeks before. All four ship whole in [`library/films`](skills/video-decompiler/library/films): source, kit, sound script and the one-page board each was built from. A new film starts as a copy of the one nearest its kind.
 
 ## What it adds to an agent
@@ -23,7 +29,7 @@ Five things here stand in for what an agent lacks:
 - **Blind readers.** Three new agents read the film frame by frame: two, from different models, in a line-up beside an accepted film; one hunting faults. Their briefs are given word for word, so the maker does not judge its own film. ([two readings in full](docs/READINGS.md))
 - **One clock.** Every event is a named beat in one table in the film's sound script, which writes both the sound and the table the picture imports. Move one number and both move. ([Plus One's `sound.py`](skills/video-decompiler/library/films/plusone/sound.py))
 - **A board, and rules for it.** The whole film on one page before any code. Every change of scene is one of five kinds, and "nothing" is not one: becomes, carried, matched, door, change of ground. ([`BOARD.md`](skills/video-decompiler/BOARD.md), [`WORLD.md`](skills/video-decompiler/WORLD.md))
-- **Traps, and a queue.** More than fifty known faults of the engine, each with its way out. Two of them: a mesh is built once, so resizing a shape later does nothing; past about nine frame-sized planes in perspective, the nearest vanish without a message. And one render at a time on a machine, however many agents share it. ([`TRAPS.md`](skills/video-decompiler/TRAPS.md))
+- **Traps, and a queue.** More than fifty known faults of the engine, each with its way out. Two of them: a mesh is built once, so resizing a shape later does nothing; a fine pattern fill the size of the frame draws nothing, and says nothing. And one render at a time on a machine, however many agents share it. ([`TRAPS.md`](skills/video-decompiler/TRAPS.md))
 
 
 Eight newer commands came after the four films, and no accepted film has been made through them: cleaning a recorded voice and making a music track the film's beat (`vd audio`), handing the cuts to an editor (`vd bridge`), fitting a reference's moves (`vd borrow`), putting a repository's counts on screen (`vd capture`, `vd launch`), a sound track made by rule from the film's moves (`vd foley`), four world sketches for readers (`vd evolve`), and a browser page that imitates the film (`vd playable`). The export's scan also checks for flashing now. [`SKILL.md`](skills/video-decompiler/SKILL.md) lists them apart from the steps, with what each does not yet do.
@@ -48,9 +54,11 @@ Either way the steps are the same, and [`SKILL.md`](skills/video-decompiler/SKIL
 
 **Proven:** product demos, launch films for technical products, moving type, and brand films built on real still pictures. All are type, cards, interface and pictures cut to music, 29 to 38 seconds long.
 
+**Not what it is for:** cutting recorded footage (interviews, podcasts, tutorials), captions, or sound for a finished picture. Use [legible-film](https://github.com/JamesDimachkie/legible-film) for those; this skill can make the parts of such a film drawn in code (a title, a bumper, an insert), and its export is an ordinary video file to cut in.
+
 **Not proven:** lit 3D scenes, scenery drawn in code, real moving footage, generated pictures, and films under ten seconds. The tools can draw them; no film of those kinds has been accepted yet, and the pages say so where it matters.
 
-**Honest limits.** Nobody but you can hear the film: the agent checks levels, not tunes. The music is written in code (one film plays it on recorded instruments), so bringing your own finished track or a recorded voice is not yet a paved road. `vd audio` now cleans a recorded voice, and can make a finished music track the film's beat: the worked film's own `sound.py` then times every event on the track's tempo and the export lays the track in. Neither has been used on an accepted film, and no one has listened to a film made that way. The four films above were made in one day by an agent with one person watching each cut and saying what was wrong. Started cold (a fresh agent, this folder and one paragraph), the skill has so far taken four test films through its own readers, each clear and plain. Both blind readers ranked every one below the worked film beside it. The person the four films were made for watched the two latest and called them close to the level of the four, with their type the place they fall short; [`BOARD.md`](skills/video-decompiler/BOARD.md) now records how the four set type. `WORLD.md` is the page written to close the gap between a clean film and one people remember; it is the newest page here and the least tested.
+**Honest limits.** Nobody but you can hear the film: the agent checks levels, not tunes. The music is written in code (one film plays it on recorded instruments), so bringing your own finished track or a recorded voice is not yet a paved road. `vd audio` now cleans a recorded voice, and can make a finished music track the film's beat: the worked film's own `sound.py` then times every event on the track's tempo and the export lays the track in. Neither has been used on an accepted film, and no one has listened to a film made that way. The four films above were made in one day by an agent with one person watching each cut and saying what was wrong. Started cold (a fresh agent, this folder and one paragraph), the skill has been tested six times, and five of those films went through its own readers, each clear and plain. Both blind readers ranked every one below the worked film beside it. The person the four films were made for called tests 3 and 5 close to the level of the four, with their type the place they fall short; [`BOARD.md`](skills/video-decompiler/BOARD.md) now records how the four set type. `WORLD.md` is the page written to close the gap between a clean film and one people remember; it is the newest page here and the least tested.
 
 ## What is whose
 
@@ -68,7 +76,7 @@ This skill leans on three things raea does. It is fast enough to look often: on 
 **You need**
 
 - an agent that reads skills (Claude Code, Codex, or another). The blind readers need one that can start other agents; without that, the skill tells you no reader has read the film.
-- [raea](https://raea.io) 0.1.1-rc4 or newer, which runs on macOS (Apple Silicon), Linux (x86_64) and Windows (x86_64). Its own installer puts it where the skill looks: `curl -fsSL https://raea.io/install | sh` on macOS and Linux, `irm https://raea.io/install.ps1 | iex` in PowerShell on Windows. Every render says which raea it found and refuses an older one; `RAEA_BIN` points it at another. The installer gives the newest build for your system, pre-releases included. The films here were checked on 0.1.1-rc4 and 0.1.2: if the installer says it couldn't find a release (it asks GitHub without signing in, and GitHub limits that), or a first run fails on a newer raea, ask the installer for 0.1.2 (`curl -fsSL https://raea.io/install | RAEA_VERSION=0.1.2 sh`, or `$env:RAEA_VERSION = "0.1.2"` before the PowerShell line).
+- [raea](https://raea.io) 0.1.1-rc4 or newer, which runs on macOS (Apple Silicon), Linux (x86_64) and Windows (x86_64). Its own installer puts it where the skill looks: `curl -fsSL https://raea.io/install | sh` on macOS and Linux, `irm https://raea.io/install.ps1 | iex` in PowerShell on Windows. Every render says which raea it found and refuses an older one; `RAEA_BIN` points it at another. The installer gives the newest build for your system, pre-releases included. The films here were checked on 0.1.1-rc4 and 0.1.2: if the installer says it couldn't find a release (it asks GitHub without signing in, and GitHub limits that), or a first run fails on a newer raea, ask the installer for 0.1.2 (`curl -fsSL https://raea.io/install | RAEA_VERSION=0.1.2 sh`, or `$env:RAEA_VERSION = "0.1.2"` before the PowerShell line). If GitHub's limit keeps stopping it, the installer's `RAEA_DOWNLOAD` takes the release from a mirror or a local folder instead ([raea's install page](https://github.com/shinyobjectz/raea/blob/main/docs/manual/start/install.md)).
 - ffmpeg 6 or newer and Python 3.10 or newer (the tests last passed on Python 3.12 with ffmpeg 9; `requirements-tested.txt` in the skill's folder holds the package versions).
 - a graphics card: every film renders on your own machine. The four films were made on Windows 11 with an 8 GB RTX 4070. On a hosted Apple Silicon Mac the tests and the first-run check pass, all four worked films draw at sampled moments and a short starter film exports whole; nobody has yet exported a worked film or made a new one there. On Linux the tests pass without raea and nothing has been rendered.
 
@@ -126,7 +134,7 @@ vd look --at 2,9,14,22,31,36     # six moments as one picture
 vd export                        # the film and a share copy, then the scan
 ```
 
-Then ask your agent for yours. In four tests, a film made cold and taken through its readers took an agent 57 to 101 minutes and 94 to 247 tool calls ([the record](docs/EVIDENCE.md)).
+Then ask your agent for yours. In the five tests that went through its readers, a film made cold took an agent 57 to 101 minutes and 94 to 247 tool calls (four of them counted) ([the record](docs/EVIDENCE.md)).
 
 ```text
 Use the video-decompiler skill to make a launch film for PRODUCT. Here is what it does: ...
@@ -140,13 +148,13 @@ Use the video-decompiler skill to make me a film like PATH/TO/FILM.mp4, for PROD
 - [`BOARD.md`](skills/video-decompiler/BOARD.md), [`TAKE-APART.md`](skills/video-decompiler/TAKE-APART.md): the film on one page, and how to read someone else's.
 - [`EYES.md`](skills/video-decompiler/EYES.md): looking, the scan, the blind readers' briefs word for word, and the person.
 - [`TECHNIQUES.md`](skills/video-decompiler/TECHNIQUES.md), [`TRAPS.md`](skills/video-decompiler/TRAPS.md): what is proven to draw, and the known engine faults with their ways out.
-- `tools/vd.py`: the front door (`doctor`, `new`, `look`, `sound`, `render`, `export`, `scan`, `pack`, `measure`, `pin`, `profile`; and, not yet proven on a film, `borrow`, `capture`, `launch`, `foley`, `evolve`, `playable`, `audio`, `bridge`).
+- `tools/vd.py`: the front door (`doctor`, `new`, `look`, `sound`, `render`, `export`, `scan`, `pack`, `measure`, `pin`, `profile`, `clean`; and, not yet proven on a film, `borrow`, `capture`, `launch`, `foley`, `evolve`, `playable`, `audio`, `bridge`).
 - `library/films/`: the worked films. The rest of `library/` is older starters and recipes, kept for the unproven kinds. Every film folder `vd new` makes carries `LICENSE-video-decompiler.txt`, the MIT notice for the code copied into it.
 
 ## What it writes on your machine
 
 - `~/.venvs/video-decompiler`: its Python environment.
-- `~/.vd/out/NAME`: everything rendered for the film folder NAME (looks, cuts, scans). Every cut is kept, so a film's folder there grows by a few hundred megabytes; it is yours to clear.
+- `~/.vd/out/NAME`: everything rendered for the film folder NAME (looks, cuts, scans). Every cut is kept, so a film's folder there grows by a few hundred megabytes. `vd clean` lists what an export makes again and removes it with `--yes`; `vd clean NAME --keep-cuts N` also drops a film's older cuts. The rest is yours to clear.
 - `~/.vd/reads`: the packs given to blind readers.
 - `~/.vd/measures`: what was measured of a film you gave it (`vd pin`, `vd measure`, `vd pack`), kept so a second call on the same file is quick.
 - `~/.vd/usage.log`: one line for each command run (the time, the command, the folder, the seconds).

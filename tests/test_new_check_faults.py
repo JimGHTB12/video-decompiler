@@ -10,6 +10,7 @@ capture: with no command given, nothing is shown as having run; the folder's own
 """
 import contextlib
 import io
+import re
 import subprocess
 import sys
 import tempfile
@@ -330,6 +331,158 @@ def test_borrow_takes_the_ground_from_the_border_and_the_octave_from_the_film():
     m = {"duration": 30.0, "events": [0.0], "sound": {"tempo": {"bpm": 200.0, "octave": [100.0, 400.0]}, "onsets": []}}
     assert borrow.compile_beat_table(m, near_fb=36)[0]["FB"] == 36
     assert borrow.compile_beat_table(m)[0]["FB"] == 18, "with no film's beat to go by, the tempo read is kept"
+
+
+def rgb_clip(path, frames, fps=12):
+    h, w = frames[0].shape[:2]
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}", "-r", str(fps), "-i", "-",
+                    "-c:v", "libx264", "-crf", "8", "-pix_fmt", "yuv420p", str(path)], input=np.stack(frames).astype(np.uint8).tobytes(), check=True)
+
+
+def borrow_planted(tmp, m, frames=None, fps=12):
+    """vd borrow, through lean.main, on a small clip whose measures are planted in borrow's cache, so what borrow writes
+    from a measure is checked without measuring a film: (film folder, dna.json, dna.gen.ts, REFERENCE.md, what it printed)."""
+    import hashlib
+    import json
+    import shutil
+    import measure
+    import pack
+    frames = [f.copy() for f in (frames or [np.full((36, 64, 3), 240, np.uint8)] * 12)]
+    h, w = frames[0].shape[:2]
+    frames[0][h // 2, w // 2] = np.random.default_rng().integers(0, 255, 3)   # a clip of its own each run: no other run's measures fit it
+    clip = Path(tmp) / "ref.mp4"
+    rgb_clip(clip, frames, fps)
+    planted = Path.home() / ".vd" / "measures" / ("borrow-" + hashlib.sha1(clip.read_bytes()).hexdigest()[:12])
+    planted.mkdir(parents=True, exist_ok=True)
+    whole = {"version": measure.VERSION, "w": w, "h": h, "fps": fps, "duration": len(frames) / fps, "summary": {}, "events": [0.0],
+             "cuts": [], "segments": [], "holds": [], "moves": [], "sound": None, **m}
+    (planted / "measure.json").write_text(json.dumps(whole), encoding="utf-8")
+    film = Path(tmp) / f"vd-test-borrowed-{Path(tmp).name[-6:]}"   # its own name: outputs go by a film folder's name
+    said = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(said):
+            assert lean.main(["borrow", str(clip), "-o", str(film), "--like", "stet", "--k", "1"]) == 0
+    finally:
+        shutil.rmtree(planted, ignore_errors=True)
+        shutil.rmtree(pack.sheets_root(clip), ignore_errors=True)
+    read = lambda p: (film / p).read_text(encoding="utf-8")
+    return film, json.loads(read("dna.json")), read("kit/dna.gen.ts"), read("REFERENCE.md"), said.getvalue()
+
+
+def test_borrow_says_when_no_move_was_fitted_and_gives_no_spring_of_its_own():
+    # broke: every move came back unfitted (HEX 0 of 4, il 0 of 27), and borrow wrote its own fallback spring
+    # {freq 2.4, damp 0.48} and curve [0.2, 0.8, 0.2, 1] as DNA_SPRING and DNA_BEZIER, and REFERENCE.md said the
+    # film's moves follow it; a film imported it as the reference's motion
+    flat = [1.0] * 24                                     # an even speed: no spring of physics.ts's family makes it
+    moves = [{"t0": 1.0 + i, "dur": 0.4, "peak": 0.5, "ease": [0.3, 0.4, 0.5, 0.8], "profile": flat, "ease_reliable": True} for i in range(3)]
+    with tempfile.TemporaryDirectory() as tmp:
+        _, dna, ts, ref, _ = borrow_planted(tmp, {"moves": moves})
+    assert not any(mv["spring"]["fitted"] for mv in dna["springs"]), dna["springs"]
+    assert dna["default_spring"] is None and dna["default_bezier"] is None, (dna["default_spring"], dna["default_bezier"])
+    assert "export const DNA_SPRING = null" in ts and "export const DNA_BEZIER = null" in ts, ts
+    assert "freq: 2.4" not in ref and "damp: 0.48" not in ref and "0.2, 0.8, 0.2, 1.0" not in ref, ref
+    assert "no move was fitted" in ref.lower(), ref
+    # one move that is a spring, among the even ones: the default is that one's, and says it comes from one move
+    good = np.abs(np.diff(spring_curve(np.linspace(0, 0.5, 25), 3.0, 0.7)))
+    moves.append({"t0": 5.0, "dur": 0.5, "peak": 0.2, "ease": [0.2, 0.9, 0.3, 1.0], "profile": list(good / good.max()), "ease_reliable": True})
+    with tempfile.TemporaryDirectory() as tmp:
+        _, dna, ts, ref, _ = borrow_planted(tmp, {"moves": moves})
+    assert abs(dna["default_spring"]["freq"] - 3.0) <= 0.15 and abs(dna["default_spring"]["damp"] - 0.7) <= 0.06, dna["default_spring"]
+    assert "1 of 4 moves" in ref, ref
+
+
+def section(md, heading):
+    """The text under one `## heading` of a page, up to the next heading."""
+    part = md.split("## " + heading, 1)
+    assert len(part) == 2, f"no heading {heading!r} in:\n{md}"
+    return part[1].split("\n## ", 1)[0]
+
+
+def test_borrow_leaves_the_world_and_idea_to_write_and_says_its_sync_against_chance():
+    # broke: REFERENCE.md was one template for every film. "The formal idea" read "Events lock to a 150.0 BPM grid" for a
+    # film whose events landed on an onset 0.286 of the time against 0.234 by chance, and "The world" and "What we
+    # take" were filled with numbers, where TAKE-APART.md asks the reader to write them from the film
+    sound = {"tempo": {"bpm": 150.0, "strength": 0.26, "octave": [75.0, 300.0]}, "onsets": [0.5, 1.0]}
+    at_chance = {"sound": sound, "summary": {"sync_rate": 0.286, "sync_chance": 0.234, "tempo_bpm": 150.0}}
+    with tempfile.TemporaryDirectory() as tmp:
+        _, _, _, ref, _ = borrow_planted(tmp, at_chance)
+    assert "lock to" not in ref.lower(), ref
+    for heading in ("The world", "The formal idea", "What we take and what stays theirs"):
+        body = section(ref, heading)
+        assert "TAKE-APART.md" in body and not re.search(r"#[0-9a-f]{6}|BPM|spring\(", body), (heading, body)
+    measured = section(ref, "Measured")
+    assert "0.286" in measured and "0.234" in measured and "no more than chance" in measured, measured
+    with tempfile.TemporaryDirectory() as tmp:
+        _, _, _, ref, _ = borrow_planted(tmp, {"sound": sound, "summary": {"sync_rate": 0.548, "sync_chance": 0.208, "tempo_bpm": 150.0}})
+    assert "above chance" in section(ref, "Measured"), ref
+    with tempfile.TemporaryDirectory() as tmp:      # no tempo in its sound: the clock is borrow's own, and says so
+        _, _, _, ref, _ = borrow_planted(tmp, {})
+    assert "not the film's" in section(ref, "Measured"), ref
+
+
+def test_borrow_takes_every_ground_with_its_time_and_keeps_the_accent_apart():
+    # broke: grounds came only from holds. A film that never rests (HEX, 1.5 s of holds in 35 s) lost five of its seven
+    # grounds; a red end card, the longest hold, was called the film's dark ground; il's dark room (#262521) was filed
+    # as ink alone; and six near-identical off-whites filled the swatches, so il's blue chip never appeared
+    def solid(c, n, chip=None):
+        f = np.zeros((36, 64, 3), np.uint8)
+        f[:] = c
+        if chip:
+            f[16:20, 29:35] = chip              # a small blue chip: an accent, not a ground
+            f[26:29, 10:54] = (37, 36, 33)      # a line of dark type
+        return [f.copy() for _ in range(n)]
+    off1, off2, dark, green, yellow, purple, red, blue = ((246, 244, 243), (239, 237, 237), (38, 37, 33), (24, 156, 71), (255, 224, 0),
+                                                          (126, 94, 188), (236, 62, 9), (32, 80, 255))
+    frames = (solid(off1, 36, blue) + solid(off2, 18, blue) + solid(dark, 30) + solid(green, 12) + solid(yellow, 3)
+              + solid(purple, 15) + solid(red, 12))                          # 12 a second: 3 s, 1.5, 2.5, 1, 0.25 (a flash), 1.25, 1
+    holds = [{"t0": 0.2, "t1": 0.4, "ground": "#f6f4f3", "bands": [0.1], "palette": [["#f8f6f5", 0.5], ["#f6f5f4", 0.2], ["#f6f4f3", 0.1], ["#f7f6f5", 0.1], ["#252421", 0.1]]},
+             {"t0": 3.2, "t1": 3.4, "ground": "#efeded", "bands": [0.1], "palette": [["#efeded", 0.6], ["#f5f4f3", 0.3], ["#252421", 0.1]]},
+             {"t0": 9.5, "t1": 10.5, "ground": "#ec3e09", "bands": [0.1], "palette": [["#ec3e09", 0.9], ["#f2f2f6", 0.1]]}]
+    with tempfile.TemporaryDirectory() as tmp:
+        _, dna, _, ref, _ = borrow_planted(tmp, {"holds": holds}, frames=frames)
+    pal = dna["palette"]
+    rgb = lambda h: np.array([int(h[i:i + 2], 16) for i in (1, 3, 5)], float)
+    near = lambda h, c, d=30: float(np.linalg.norm(rgb(h) - np.array(c, float))) < d
+    seconds = lambda c: next((g["seconds"] for g in pal.get("grounds") or [] if near(g["hex"], c)), None)
+    got = [seconds(c) for c in (off1, dark, green, purple, red)]
+    assert all(s is not None and abs(s - want) <= 0.3 for s, want in zip(got, (4.5, 2.5, 1.0, 1.25, 1.0))), (got, pal)
+    assert len(pal["grounds"]) == 5 and seconds(yellow) is None, ("a 0.25 s flash is no ground; the two off-whites are one", pal["grounds"])
+    assert all(g["spans"] for g in pal["grounds"]) and near(pal["ground"], off1) and pal["is_dark"] is False, pal
+    assert near(pal["accent"], blue, 60), ("the accent is the blue chip, never a ground", pal["accent"])
+    sw = [s["hex"] for s in pal["swatches"]]
+    assert all(not near(a, rgb(b), 20) for i, a in enumerate(sw) for b in sw[i + 1:]), ("near-identical swatches are one", sw)
+    assert sum(s["weight"] for s in pal["swatches"]) <= 1.004, ("shares of the time held, each rounded to 3 places", pal["swatches"])
+    measured = section(ref, "Measured")
+    assert all(any(near(h, c) for h in re.findall(r"#[0-9a-f]{6}", measured)) for c in (off1, dark, green, purple, red)), measured
+
+
+def test_borrow_labels_its_beat_table_and_keeps_every_cue():
+    # broke: DNA_TIMES held beats with no unit (END 42.559 in a 17 s film), so a reader took them for seconds past the
+    # film's end and threw the table away; and the cues stopped after 24 events (at 23.4 s of a 34.9 s film)
+    events = [round(0.5 + 0.6 * i, 3) for i in range(30)]           # 30 events from 0.5 to 17.9 s
+    sound = {"tempo": {"bpm": 150.0, "strength": 0.3, "octave": [75.0, 300.0]}, "onsets": []}
+    with tempfile.TemporaryDirectory() as tmp:
+        _, dna, ts, ref, _ = borrow_planted(tmp, {"duration": 18.5, "events": events, "cuts": events[::3], "sound": sound,
+                                                  "summary": {"tempo_bpm": 150.0}})
+    times, beat = dna["times"], dna["clock"]["FB"] / dna["clock"]["FPS"]
+    assert times.get("UNIT") == "beats" and abs(times.get("BEAT_S", 0) - beat) < 1e-6, times
+    secs = times.get("SECONDS") or {}
+    assert [round(t, 2) for t in secs.get("EVENTS", [])] == [round(t, 2) for t in events], secs
+    assert len(secs.get("CUTS", [])) == 10 and secs.get("END", 99) <= 18.5 and times["END"] > 18.5, ("END in beats lies past the end in seconds", times)
+    assert len(dna["cues"]) == 30, f"every event is a cue, not the first 24: {len(dna['cues'])}"
+    assert all(set(c) == {"name", "s", "beat"} and abs(c["s"] - c["beat"] * beat) < 0.002 for c in dna["cues"]), dna["cues"][:3]
+    assert re.search(r"//[^\n]*DNA_TIMES[^\n]*beats[^\n]*\n", ts), ts
+    assert "beats" in section(ref, "Measured") and "seconds" in section(ref, "Measured"), ref
+
+
+def test_vd_borrow_says_what_it_wrote():
+    # broke: through vd.py (lean.cmd_borrow) borrow printed only the folder's path; its summary lived in borrow.main
+    with tempfile.TemporaryDirectory() as tmp:
+        film, _, _, _, said = borrow_planted(tmp, {})
+    lines = said.strip().splitlines()
+    assert lines and lines[-1] == str(film), ("the last line is still the folder", lines[-3:])
+    for what in ("dna.json", "dna.gen.ts", "REFERENCE.md", "grounds", "spring"):
+        assert what in said, (what, said)
 
 
 def test_evolve_for_a_repository_writes_its_counts_on_every_board():

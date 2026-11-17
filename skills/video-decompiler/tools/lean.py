@@ -23,6 +23,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -203,7 +204,8 @@ def usage_log(cmd, film, seconds, path=None):
         pass
 
 
-LEAN_ONLY = {"look", "export", "pack", "pin", "profile", "scan", "borrow", "steal", "capture", "launch", "foley", "evolve", "playable", "audio", "bridge"}
+NOT_PROVEN = {"borrow", "capture", "launch", "foley", "evolve", "playable", "audio", "bridge"}   # SKILL.md, "Newer commands"
+LEAN_ONLY = {"look", "export", "pack", "pin", "profile", "scan", "clean", "borrow", "steal", "capture", "launch", "foley", "evolve", "playable", "audio", "bridge"}
 
 
 def claims(argv):
@@ -1396,6 +1398,21 @@ def run_sound_py(d):
     return f"  cd {q(d)}\n  {q(PY)} sound.py"
 
 
+def film_sound(d, s):
+    """The sound the export lays under the picture, from score.json: the film's own mix as it is when nothing is added
+    to it, else the mix built from score.json (a voice, a mapped track, stems over the own mix), built again when older
+    than anything it is made from. vd export and vd playable both play this. (wav, what was done or None)."""
+    if s.get("sound_file") and not s.get("voice") and not s.get("music"):
+        return own_sound(d, s), f"sound is {s['sound_file']}, as it is"
+    if s.get("sound_file"):
+        own_sound(d, s)                 # stops on a stale own mix even when the built sound is newer than it
+    wav = outdir(d) / "sound.wav"
+    if not wav.exists() or wav.stat().st_mtime < max(p.stat().st_mtime for p in sound_inputs(d, s)):
+        build_sound(d, s)
+        return wav, "sound built from score.json" + (f": its voice over {s['sound_file']}, this film's own mix" if s.get("sound_file") else "")
+    return wav, None
+
+
 def own_sound(d, s):
     """The film's own finished mix (score.json's sound_file: a worked film's sound.py writes media/sound.wav), as it is.
     Stops when it is missing, and when the sound.py beside it is newer than it or than the times it writes for the
@@ -1503,16 +1520,10 @@ def _export(a, cut=None, done=None):
         said.append("picture is current, not rendered again")
     if a.sound:
         wav = Path(a.sound).resolve()
-    elif s and s.get("sound_file") and not s.get("voice") and not s.get("music"):
-        wav = own_sound(d, s)
-        said.append(f"sound is {s['sound_file']}, as it is")
     elif s:
-        if s.get("sound_file"):
-            own_sound(d, s)                 # stops on a stale own mix even when the built sound is newer than it
-        wav = out / "sound.wav"
-        if not wav.exists() or wav.stat().st_mtime < max(p.stat().st_mtime for p in sound_inputs(d, s)):
-            build_sound(d, s)
-            said.append("sound built from score.json" + (f": its voice over {s['sound_file']}, this film's own mix" if s.get("sound_file") else ""))
+        wav, did = film_sound(d, s)
+        if did:
+            said.append(did)
     else:
         wav = out / f"{dest.stem}.sound.wav"
         ok, secs, line = raea_render(d, entry, wav, *(["--composition", comp] if comp else []))
@@ -1927,6 +1938,163 @@ def newest_transcript(d, days=7):
     return named
 
 
+# ---------------------------------------------------------------- clean
+# What a film's output folder holds that an export makes again, under the folder's lock, when it is missing: the drawn
+# picture it reuses (an export redraws it when absent), the note of what it was drawn from, and raea's per-part records.
+# Nothing else: folders such as sub/ or frames/ held finished films that nothing makes again, and files that vd sound
+# or vd look write without the lock could go mid-build (a review's findings).
+REBUILT = ("*.picture.mp4", "*.picture.mp4.sources.json", "*.part.render.json")
+
+
+def _linked(p):
+    """A symlink or a Windows junction: clean never follows one or removes through one (a linked output folder took
+    clean outside VD_OUT, a review's finding). Other reparse points (a OneDrive or deduplicated file) are ordinary
+    files that happen to be stored elsewhere, and are read as such."""
+    try:
+        st = os.lstat(p)
+    except OSError:
+        return False
+    if stat.S_ISLNK(st.st_mode):
+        return True
+    tag = getattr(st, "st_reparse_tag", 0)
+    return tag in (0xA0000003, 0xA000000C)    # IO_REPARSE_TAG_MOUNT_POINT (junction), IO_REPARSE_TAG_SYMLINK
+
+
+def _size(p):
+    p = Path(p)
+    if _linked(p):
+        return 0
+    if p.is_file():
+        return p.stat().st_size
+    total = 0
+    for root, dirs, files in os.walk(p, followlinks=False):
+        dirs[:] = [d for d in dirs if not _linked(Path(root) / d)]
+        total += sum((Path(root) / f).stat().st_size for f in files if not _linked(Path(root) / f))
+    return total
+
+
+def _rebuilt(o):
+    """The files of output folder O that an export makes again: its own export, share copy and cuts are never among
+    them, though a film folder called NAME.picture exports NAME.picture.mp4 (a review's finding)."""
+    own = {f"{o.name}.mp4".lower(), f"{o.name}-share.mp4".lower()}
+    out = []
+    for pat in REBUILT:
+        for f in o.glob(pat):
+            if f.is_file() and not _linked(f) and f.name.lower() not in own:
+                out.append(f)
+    return out
+
+
+def _cut_files(o, stem, n):
+    """Cut N of the film STEM in O/cuts: NAME-cutN.mp4 and NAME-cutN-*, matched as text. A glob built from the name took
+    a sibling film's cut when the name held [ or ? (film[1] matched film1), a review's finding."""
+    pre = f"{stem}-cut{n}"
+    return [f for f in (o / "cuts").iterdir()
+            if f.is_file() and not _linked(f) and (f.name.startswith(pre + ".") or f.name.startswith(pre + "-"))]
+
+
+def clean_plan(o, keep_cuts=None, keep=()):
+    """What vd clean would remove from one output folder O: [(path, bytes, why)]. Nothing is removed here. A finished
+    film is listed only as an older cut the person asked to drop with --keep-cuts."""
+    o = Path(o)
+    plan = [(f, f.stat().st_size, "made again when needed") for f in _rebuilt(o)]
+    if keep_cuts is not None and (o / "cuts").is_dir() and not _linked(o / "cuts"):
+        cuts = {}
+        for f in (o / "cuts").iterdir():
+            m = CUT.fullmatch(f.name)
+            if m and f.is_file() and not _linked(f):
+                cuts.setdefault(m.group(1), set()).add(int(m.group(2)))
+        for stem, ns in sorted(cuts.items()):   # each film name keeps its own N newest (export -o gives a folder several)
+            for n in sorted(ns)[:-keep_cuts]:
+                if n in keep:   # a cut the person named with --keep, accepted or pinned, stays whatever its number
+                    continue
+                for f in _cut_files(o, stem, n):
+                    plan.append((f, f.stat().st_size, f"{stem} cut {n}: older than its {keep_cuts} newest"))
+    return plan
+
+
+def orphan_note(o):
+    """A line about an output folder whose film folder is not there, or None. Only said, never acted on: a film folder
+    on an unplugged drive, an unmounted share or a moved project reads as missing too, and such folders hold cuts,
+    blind-read keys and evolve keys that nothing else holds (a review's findings)."""
+    try:
+        owner = (Path(o) / OWNER).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not owner or os.path.lexists(owner):
+        return None
+    return f"its film folder {owner} is not there ({_size(o) / 2**20:,.0f} MB here); if it is gone for good, remove the folder yourself"
+
+
+def _out_folder(name):
+    """OUTROOT/NAME, for a NAME that is one folder in it and no link: clean reached outside VD_OUT through `../x`."""
+    root = OUTROOT.resolve()
+    if not name or name in (".", "..") or any(c in name for c in "/\\:") or Path(name).name != name:
+        raise SystemExit(f"vd clean: {name!r} is not the name of one folder in {OUTROOT}")
+    o = OUTROOT / name
+    if not o.is_dir() or _linked(o) or o.resolve().parent != root:
+        raise SystemExit(f"vd clean: no output folder called {name} in {OUTROOT}" + (" (it is a link; clean does not follow links)" if _linked(o) else ""))
+    return o
+
+
+def cmd_clean(a):
+    """vd clean: what can go from ~/.vd/out (or VD_OUT), said before anything goes. Without --yes it only lists."""
+    if a.keep_cuts is not None:
+        # dropping cuts is done one film at a time: across every folder, one --keep meant for one film kept another's
+        if a.keep_cuts < 1:
+            raise SystemExit("vd clean: --keep-cuts takes 1 or more (the newest cut of each film always stays)")
+        if len(a.names or ()) != 1:
+            raise SystemExit("vd clean: --keep-cuts drops cuts of one film's folder at a time: name it (vd clean NAME --keep-cuts N)")
+    if a.keep and a.keep_cuts is None:
+        raise SystemExit("vd clean: --keep goes with --keep-cuts (plain clean never removes a cut)")
+    if a.names:
+        folders = [_out_folder(n) for n in a.names]
+    else:
+        folders = sorted(p for p in OUTROOT.iterdir() if p.is_dir() and not _linked(p)) if OUTROOT.is_dir() else []
+    keep = set(a.keep or ())
+    if keep:
+        have = {int(m.group(2)) for f in ((folders[0] / "cuts").iterdir() if (folders[0] / "cuts").is_dir() else ())
+                if (m := CUT.fullmatch(f.name)) and f.is_file() and not _linked(f)}   # a folder named like a cut is none
+        wrong = sorted(k for k in keep if k not in have)
+        if wrong:
+            raise SystemExit(f"vd clean: no cut {', '.join(map(str, wrong))} in {folders[0].name}/cuts (its cuts: "
+                             f"{', '.join(map(str, sorted(have))) or 'none'}); nothing was removed")
+    total, freed, busy, stuck = 0, 0, [], []
+    for o in folders:
+        plan = clean_plan(o, a.keep_cuts, keep)
+        note = orphan_note(o) if a.orphans else None
+        if note:
+            print(f"{o.name}: {note}")
+        if not plan:
+            continue
+        here = sum(b for _, b, _ in plan)
+        total += here
+        print(f"{o.name}: {here / 2**20:,.0f} MB")
+        for f, b, why in plan:
+            print(f"  {f.relative_to(OUTROOT)}  {b / 2**20:,.1f} MB  ({why})")
+        if not a.yes:
+            continue
+        try:
+            with held(o, "clean"):
+                # what goes is decided again under the lock: the folder may have changed since it was listed
+                for f, b, _ in clean_plan(o, a.keep_cuts, keep):
+                    try:
+                        f.unlink()
+                        freed += b
+                    except FileNotFoundError:
+                        pass
+                    except OSError as e:   # open in a player, say: kept, and the rest still goes
+                        stuck.append(f"{f.relative_to(OUTROOT)} ({e.strerror or e})")
+        except Busy as e:
+            busy.append(f"{o.name} ({str(e) or 'in use'})")
+    if not a.yes:
+        print(f"\n{total / 2**20:,.0f} MB could go from {OUTROOT}. Nothing was removed: run again with --yes to remove it.")
+    else:
+        print(f"\nremoved {freed / 2**20:,.0f} MB from {OUTROOT}." + (" Skipped, in use: " + ", ".join(busy) if busy else "")
+              + (" Not removed, open elsewhere: " + ", ".join(stuck) if stuck else ""))
+    return 0
+
+
 def cmd_profile(a):
     d = film_dir(a.film)
     tr = [Path(t) for t in a.transcript] if a.transcript else [newest_transcript(d)]
@@ -1949,13 +2117,14 @@ def cmd_borrow(a):
     kit/dna.gen.ts and REFERENCE.md."""
     import borrow
     d = Path(a.out).resolve() if getattr(a, "out", None) else film_dir(a.film, required=False)
-    out_dir, _dna = borrow.compile_dna_cartridge(
+    out_dir, dna = borrow.compile_dna_cartridge(
         ref_video=Path(a.ref),
         out_dir=d,
         repo_dir=Path(a.for_repo) if getattr(a, "for_repo", None) else None,
         k=getattr(a, "k", 5),
         like=getattr(a, "like", None),
     )
+    borrow.say(a.ref, out_dir, dna)
     return made_it(out_dir)
 
 
@@ -2106,7 +2275,7 @@ def cmd_audio(a):
         if (d / "sound.py").is_file():
             print(f"tempo_map: {res['bpm']:.2f} BPM, fitted to {m['film_bpm']:g} BPM ({m['fb']} frames a beat, stretched x{m['stretch']:.4f}) "
                   f"-> {m['file']} and score.json's music{('; ' + m['octave']) if m.get('octave') else ''}; its beats sit {m['off_grid_ms']['median']:g} ms from the grid at the median, 90% within "
-                  f"{m['off_grid_ms']['p90']:g} ms (listen: a track whose tempo wanders will not hold one beat). Now run the film's sound.py, so its beats, its picture and its sound move "
+                  f"{m['off_grid_ms']['p90']:g} ms, and slide {m['off_grid_ms'].get('drift')} ms over the track (refused above {tempo_map.DRIFT_MAX_MS:g}; a floor, so listen). Now run the film's sound.py, so its beats, its picture and its sound move "
                   f"onto this tempo; then vd sound or vd export lays the track {'in place of' if m['replace'] else 'under'} the film's own mix:\n"
                   f"{run_sound_py(d)}")
         else:
@@ -2234,17 +2403,25 @@ def main(argv=None):
                        "Frames that pop, stretches that stand still for 0.5 s or more, and the sound's level and true peak; a line starting "
                        "`fix before anyone watches:` for each pop, and one starting `check:` for each hold over 1 s (a hold can be chosen). Written to ~/.vd/out/NAME/scan.txt. Never fails.")
     s.add_argument("target", metavar="FILM"); s.set_defaults(fn=cmd_scan)
+    s = sub.add_parser("clean", help="what can go from ~/.vd/out, and with --yes, remove it",
+                       description="Lists, by output folder, what an export makes again when it is missing (the drawn picture it reuses, the note of what it was drawn from, raea's per-part records) and its size. "
+                                   "Everything else stays: cuts, share copies, sheets, scans, keys, pins, notes and any folder. --keep-cuts N also lists all but the N newest cuts of each film name, except cuts named with --keep; --keep-cuts works on one named folder; --orphans also names folders whose film folder is not there, and removes nothing of theirs but the above. Nothing is removed without --yes, and a folder an export holds is skipped.")
+    s.add_argument("names", nargs="*", metavar="NAME", help="output folders to look in (default: all of them)")
+    s.add_argument("--keep-cuts", type=int, metavar="N", help="also list all but each film name's N newest cuts (N is 1 or more)")
+    s.add_argument("--keep", type=int, action="append", metavar="CUT", help="with --keep-cuts: keep this cut number too, whatever its age (an accepted or pinned cut); repeat for more")
+    s.add_argument("--orphans", action="store_true", help="also name folders whose film folder is not there (never removed: the drive may only be unplugged)")
+    s.add_argument("--yes", action="store_true", help="remove what is listed"); s.set_defaults(fn=cmd_clean)
     s = sub.add_parser("profile", help="minutes by class for the session that made a film", description="Needs a vd new folder and a Claude Code session log: the newest that names the folder, or --transcript PATH.jsonl.")
     s.add_argument("--transcript", action="append")
     s.add_argument("--since", help="only the session from this UTC time (ISO), for a film made inside a longer session")
     s.add_argument("--until", help="only the session up to this UTC time (ISO)"); s.set_defaults(fn=cmd_profile)
     s = sub.add_parser("borrow", help="not proven: a reference's fitted moves and colours",
-                       description=NP + "Fits each move the reference makes to a spring (how fast, how damped) and a curve, and takes its held colours, into dna.json, kit/dna.gen.ts and a REFERENCE.md to finish by TAKE-APART.md. A move with no usable profile is marked unfitted. It pins no targets: run vd pin REF as well, since vd measure reads pin's numbers.")
+                       description=NP + "Fits each move the reference makes to a spring (how fast, how damped) and a curve, and takes its colours (every ground, a full-frame colour held 0.5 s or more, with its times; the accents on them), into dna.json, kit/dna.gen.ts and a REFERENCE.md to finish by TAKE-APART.md. A move with no usable profile is marked unfitted; when no move fits, DNA_SPRING and DNA_BEZIER are null and it says so. It pins no targets: run vd pin REF as well, since vd measure reads pin's numbers.")
     s.add_argument("ref", metavar="REF.mp4"); s.add_argument("--for", dest="for_repo", metavar="REPO", help="also record this repository's counts in dna.json (nothing reads them yet)")
     s.add_argument("-o", "--out", dest="out", help="destination film folder"); s.add_argument("--k", type=int, default=5)
     s.add_argument("--like", choices=("plusone", "stet", "onoma", "linden"), help="the worked film to copy when borrow makes a new film folder (plusone, stet, onoma, linden): chosen, never guessed"); s.set_defaults(fn=cmd_borrow)
     s = sub.add_parser("capture", help="not proven: a repository's counts or a command's output, as a plane your film imports",
-                       description=NP + "Writes kit/puppet.gen.ts (the repository's counts, read by file and name patterns, so check them; or, with --cmd, the command's real output lines and times) and kit/PuppetPlane.tsx, a plane that shows them. Your film must import the plane itself. The command runs with no shell.")
+                       description=NP + "Writes kit/puppet.gen.ts (the repository's counts, read by file and name patterns, so check them; or, with --cmd, the command's real output lines and times, every line whole) and kit/PuppetPlane.tsx, a plane that shows them, the latest eight at a time as a terminal scrolls. Your film must import the plane itself. The command runs with no shell.")
     s.add_argument("--cmd", dest="cmd_str", help="a program and its arguments, run with no shell, its output lines recorded with their times")
     s.add_argument("--repo", help="repository folder to count (default: the film folder)")
     s.add_argument("--timeout", type=float, default=30.0, help="seconds the command may run before it is stopped (default 30)")
@@ -2255,9 +2432,12 @@ def main(argv=None):
     s.add_argument("--like", choices=("plusone", "stet", "onoma", "linden"), help="override archetype")
     s.add_argument("--cmd", dest="cmd_str", help="a program to run with no shell and record, as vd capture --cmd"); s.set_defaults(fn=cmd_launch)
     s = sub.add_parser("foley", help="not proven: a sound track made by rule from the moves in the film's code",
-                       description=NP + "Reads camera moves and named cues from the film's code by pattern (sizes are guessed from cue names, not measured from the picture) into kit/telemetry.gen.json, and makes media/foley.wav from them. Nothing plays it unless you mix it. kit/telemetry.gen.json makes the next vd export draw the film again.")
+                       description=NP + "Reads camera moves and named cues from the film's code by pattern (sizes are guessed from cue names, not measured from the picture) into ~/.vd/out/NAME/telemetry.gen.json, outside the film, and makes media/foley.wav from them. Nothing plays it unless you mix it. "
+                                   "Its level: --mix adds it 9.5 dB under media/sound.wav and moves the whole toward -15 LUFS by at most 6 dB with its true peak at "
+                                   "-2.2 dBTP, and says the level it wrote. Under a track mapped with vd audio --tempo-map, the film's own mix (foley and all) "
+                                   "plays at score.json's sound_file_gain, in dB (0 when absent): raise or lower it there.")
     s.add_argument("-o", help="output wav path (default media/foley.wav)")
-    s.add_argument("--mix", action="store_true", help="also add it into media/sound.wav, which sound.py owns: its next run drops it, and a second --mix adds it twice"); s.set_defaults(fn=cmd_foley)
+    s.add_argument("--mix", action="store_true", help="also add it into media/sound.wav, which sound.py owns: its next run drops it, and a second --mix adds it twice; prints the level written"); s.set_defaults(fn=cmd_foley)
     s = sub.add_parser("evolve", help="not proven: four world sketches as a blind line-up",
                        description=NP + "Packs four sketches, one after each worked film, as a blind line-up (tournament/A..D, its key in evolve-N-KEY.txt). Without --render each sketch is a fixed drawing per worked film with your subject's name on it; with it, the worked films are drawn untouched. Letters are dealt at random (the key file records them); --seed fixes them for a test. The person picks the world (EYES.md, Readers).")
     s.add_argument("name", nargs="?", help="film folder name"); s.add_argument("--for", dest="for_repo", metavar="REPO", help="put this repository's counts on each sketch's board")
@@ -2267,10 +2447,10 @@ def main(argv=None):
     s.add_argument("--readings", help="sum the readers' ranks in READINGS.md and promote the top sketch; readers rank sparse sketches higher, so prefer --select with the person's pick")
     s.add_argument("--key", help="explicit evolve-N-KEY.txt path"); s.add_argument("--mutate", help="nearest reference MP4 to pin/borrow into the winning candidate"); s.set_defaults(fn=cmd_evolve)
     s = sub.add_parser("playable", help="not proven: a browser page that imitates the film, for scrubbing",
-                       description=NP + "Builds the film's code against a small stand-in for raea into ~/.vd/out/NAME/playable/index.html, scrubbed with the wheel. It is not the film: raea does not draw it, nothing compares its frames with the export, and parts of the kit (Freeze in kit/lib/finish.tsx, 3D) do not build. Needs esbuild or bun.")
+                       description=NP + "Builds the film's code against a small stand-in for raea into ~/.vd/out/NAME/playable/index.html, scrubbed with the wheel, the whole frame scaled to any window, with the sound the export lays under the picture (the film's own mix, or the mix built from score.json with its voice and mapped track). It is not the film: raea does not draw it, nothing compares its frames with the export, and parts of the kit (Freeze in kit/lib/finish.tsx, 3D) do not build. Needs esbuild or bun.")
     s.add_argument("entry", nargs="?"); s.add_argument("-o", help="output directory (default ~/.vd/out/NAME/playable)"); s.set_defaults(fn=cmd_playable)
     s = sub.add_parser("audio", help="not proven: clean a voice, make a music track the film's beat, or draw a track's sound",
-                       description=NP + "From legible-film. --clean-voice: five steps, each refused when it costs the speech more than 3 dB; a refusal keeps the steps before it in NAME-clean-partial.wav and leaves the film's voice as it was. --tempo-map: makes the track the film's beat: score.json's music holds its tempo and the nearest whole frames a beat, and media/NAME-fitted.wav the track stretched (at most 3%) and placed so its first beat, or its drop with --drop-at-beat, falls on a beat; run the film's sound.py next, which takes the beat from it, and the mix lays the track under the film's own (or in its place, --replace-own-mix). A track with no steady beat or needing more stretch is refused; how far its beats sit from the grid is said, since a drifting track cannot be told from ordinary music by these measures. --sheet: the track's sound drawn as one picture.")
+                       description=NP + "From legible-film. --clean-voice: five steps, each refused when it costs the speech more than 3 dB; a refusal keeps the steps before it in NAME-clean-partial.wav and leaves the film's voice as it was. --tempo-map: makes the track the film's beat: score.json's music holds its tempo and the nearest whole frames a beat, and media/NAME-fitted.wav the track stretched (at most 3%) and placed so its first beat, or its drop with --drop-at-beat, falls on a beat; run the film's sound.py next, which takes the beat from it, and the mix lays the track under the film's own (or in its place, --replace-own-mix). A track with no steady beat, needing more stretch, or whose beat slides more than 40 ms from one steady grid (measured stretch by stretch, 16 beats each; a floor, since it does not follow a beat) is refused with the numbers. --bpm takes 60 to 200. --sheet: the track's sound drawn as one picture.")
     s.add_argument("track", metavar="TRACK.wav"); s.add_argument("--clean-voice", action="store_true", help="five-step dialogue cleanup into media/")
     s.add_argument("--tempo-map", action="store_true", help="make the track the film's beat (then run the film's sound.py)")
     s.add_argument("--sheet", action="store_true", help="draw the track's sound, its onsets and the film's cues as one picture")
@@ -2278,7 +2458,7 @@ def main(argv=None):
     s.add_argument("--replace-own-mix", action="store_true", help="with --tempo-map: the track in place of the film's own mix, not under it")
     s.add_argument("-o", help="output path"); s.set_defaults(fn=cmd_audio)
     s = sub.add_parser("bridge", help="not proven: the export's cuts for an editor or legible-film",
-                       description=NP + "Writes cues.json (the shape legible-film reads, bound by hash to the exported file), picture-timing.json, a Final Cut Pro 7 XML file and an OpenTimelineIO file. Both place the picture and the sound the file has alike, --host-in a gap before them. No editing program has opened them: check them in the program.")
+                       description=NP + "Writes cues.json (the shape legible-film reads, bound to the exported file by its video stream's hash, picture.sha256; the whole file's is picture.file_sha256), picture-timing.json, a Final Cut Pro 7 XML file and an OpenTimelineIO file. Both place the picture and the sound the file has alike, --host-in a gap before them. No editing program has opened them: check them in the program.")
     s.add_argument("--video", help="the exported film (default ~/.vd/out/NAME/NAME.mp4); refused when missing")
     s.add_argument("--host-in", type=float, default=0.0, help="host timeline start offset in seconds")
     s.add_argument("-o", help="output directory (default ~/.vd/out/NAME/bridge)"); s.set_defaults(fn=cmd_bridge)
@@ -2292,6 +2472,10 @@ def main(argv=None):
     MADE.clear()
     t0 = time.monotonic()
     code = 1
+    if a.cmd in NOT_PROVEN:
+        # said where the command runs, not only in SKILL.md: an agent that reaches for one of these hears it each time
+        print(f"note: vd {a.cmd} is not proven on a film yet (no accepted film was made through it; SKILL.md, \"Newer "
+              "commands\"). Prefer the older route when it does the job.", file=sys.stderr)
     try:
         r = a.fn(a)
         code = r if isinstance(r, int) else 0
