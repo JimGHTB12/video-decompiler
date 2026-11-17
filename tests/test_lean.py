@@ -582,17 +582,21 @@ def test_clean_never_reaches_outside_its_folder():
             os.symlink(outside, lean.OUTROOT)
         assert _refused("--yes") and _refused("f", "--yes") and _refused(), "a linked VD_OUT is refused"
         assert (outside / "f" / "f.main.film.picture.mp4").exists(), "nothing through a linked VD_OUT"
-        # a relative VD_OUT, from a folder reached through the link: the walk up stopped at "." (a council's finding)
+        # a relative VD_OUT, from a folder reached through the link: the walk up stopped at "." (a council's finding).
+        # Windows keeps the junction in the current folder's path; Linux and macOS give the real folder, so there a
+        # relative VD_OUT crosses no link and is not refused
         (outside / "inner" / "rel" / "g").mkdir(parents=True)
         _drawn(outside / "inner" / "rel" / "g" / "g.main.film.picture.mp4", b"precious")
         here = os.getcwd()
         os.chdir(lean.OUTROOT / "inner")
         try:
             lean.OUTROOT = Path("rel")
-            assert _refused("--yes") and _refused(), "a relative VD_OUT under a link is refused"
+            if os.name == "nt":
+                assert _refused("--yes") and _refused(), "a relative VD_OUT under a link is refused"
         finally:
             os.chdir(here)
-        assert (outside / "inner" / "rel" / "g" / "g.main.film.picture.mp4").exists(), "nothing through a relative VD_OUT"
+        if os.name == "nt":
+            assert (outside / "inner" / "rel" / "g" / "g.main.film.picture.mp4").exists(), "nothing through a relative VD_OUT"
     finally:
         lean.OUTROOT = keep
 
