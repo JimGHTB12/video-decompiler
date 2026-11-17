@@ -369,6 +369,19 @@ def test_playable_exports_interactive_runtime_twin():
         # ended while the picture looped on silently
         assert "\"baseFrequency\",\"numOctaves\",\"stdDeviation\"" in js, "SVG keeps its camelCase attribute names"
         assert ("loop>" in html) or ("<audio" not in html), "the sound loops with the picture"
+        # a film whose sound comes from vd sound: a rebuilt mix reaches a rebuilt playable (the first build's copy had
+        # kept every later mix out)
+        (d / "media" / "sound.wav").unlink(missing_ok=True)
+        out_play2 = Path(tmp) / "playable-out-2"
+        built = Path(lean.outdir(d)) / "sound.wav"
+        built.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            for level in (0.1, 0.2):
+                lean.write_wav(built, np.full((4800, 2), level, np.float32))
+                assert lean.main(["playable", "--film", str(d), "-o", str(out_play2)]) == 0
+                assert (out_play2 / "media" / "sound.wav").read_bytes() == built.read_bytes(), "the current mix"
+        finally:
+            built.unlink(missing_ok=True)
 
 
 def test_flash_scan_catches_wcag_231_flashing_and_wcag_45_contrast():

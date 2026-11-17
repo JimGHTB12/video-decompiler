@@ -451,7 +451,10 @@ def build_playable(film_dir: Path, entry: Path = None, out_dir: Path = None):
     if (film_dir / "media").is_dir():
         shutil.copytree(film_dir / "media", out_dir / "media", dirs_exist_ok=True)
     built_wav = lean.outdir(film_dir) / "sound.wav"
-    if built_wav.is_file() and not (out_dir / "media" / "sound.wav").is_file():
+    # the film's own media/sound.wav (copied above) wins; otherwise the mix vd sound built, copied on every build. The
+    # test was whether the playable already had a sound.wav, which it did from its first build, so a rebuilt mix never
+    # reached it and the new picture played against the old sound.
+    if built_wav.is_file() and not (film_dir / "media" / "sound.wav").is_file():
         (out_dir / "media").mkdir(parents=True, exist_ok=True)
         shutil.copy2(built_wav, out_dir / "media" / "sound.wav")
 
