@@ -67,6 +67,10 @@ def tile_h(film):
     return max(1, int(W * v["h"] / v["w"] + 0.5))       # raw RGB frames need no even height
 
 
+BATCH = 48   # story tiles picked per ffmpeg call: ffmpeg's expression parser refuses a select of about 100 terms
+             # (120 failed on a 110 s film), and one command for a whole long film was too long for Windows
+
+
 def tiles(film, start=0.0, length=None, h=None):
     """(time, picture) at FPS a second from `start`, for `length` seconds (all when None), each the frame on screen at its
     time: the last frame whose own time is at or before it, read from the file's packets. ffmpeg's fps filter picked
@@ -83,13 +87,19 @@ def tiles(film, start=0.0, length=None, h=None):
     if not ticks:
         return []
     want = [max(0, int(np.searchsorted(times, t + 1e-6, side="right")) - 1) for t in ticks]
-    first, frames = want[0], sorted(set(want))
-    ss = 0.0 if first == 0 else float(times[first - 1] + times[first]) / 2      # half way back: the seek lands on `first`
-    pick = "+".join(f"eq(n\\,{f - first})" for f in frames)
-    cmd = ["ffmpeg", "-v", "error", "-ss", f"{ss:.6f}", "-i", str(film), "-vf", f"select='{pick}',scale={W}:{h}", "-fps_mode", "passthrough",
-           "-frames:v", str(len(frames)), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
-    raw = subprocess.run(cmd, capture_output=True, check=True, creationflags=NO_WINDOW).stdout
-    got = {f: Image.frombytes("RGB", (W, h), raw[k * W * h * 3:(k + 1) * W * h * 3]) for k, f in enumerate(frames) if (k + 1) * W * h * 3 <= len(raw)}
+    frames, got = sorted(set(want)), {}
+    # in batches, each from its own seek: one select of every tile's frame made a command line too long for Windows on
+    # a film over about 21 minutes (a council's finding)
+    for b in range(0, len(frames), BATCH):
+        part = frames[b:b + BATCH]
+        first = part[0]
+        ss = 0.0 if first == 0 else float(times[first - 1] + times[first]) / 2      # half way back: the seek lands on `first`
+        pick = "+".join(f"eq(n\\,{f - first})" for f in part)
+        cmd = ["ffmpeg", "-v", "error", "-ss", f"{ss:.6f}", "-i", str(film), "-vf", f"select='{pick}',scale={W}:{h}", "-fps_mode", "passthrough",
+               "-frames:v", str(len(part)), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+        raw = subprocess.run(cmd, capture_output=True, check=True, creationflags=NO_WINDOW).stdout
+        got.update({f: Image.frombytes("RGB", (W, h), raw[k * W * h * 3:(k + 1) * W * h * 3]) for k, f in enumerate(part)
+                    if (k + 1) * W * h * 3 <= len(raw)})
     return [(t, got[f]) for t, f in zip(ticks, want) if f in got]
 
 

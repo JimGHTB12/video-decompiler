@@ -582,6 +582,17 @@ def test_clean_never_reaches_outside_its_folder():
             os.symlink(outside, lean.OUTROOT)
         assert _refused("--yes") and _refused("f", "--yes") and _refused(), "a linked VD_OUT is refused"
         assert (outside / "f" / "f.main.film.picture.mp4").exists(), "nothing through a linked VD_OUT"
+        # a relative VD_OUT, from a folder reached through the link: the walk up stopped at "." (a council's finding)
+        (outside / "inner" / "rel" / "g").mkdir(parents=True)
+        _drawn(outside / "inner" / "rel" / "g" / "g.main.film.picture.mp4", b"precious")
+        here = os.getcwd()
+        os.chdir(lean.OUTROOT / "inner")
+        try:
+            lean.OUTROOT = Path("rel")
+            assert _refused("--yes") and _refused(), "a relative VD_OUT under a link is refused"
+        finally:
+            os.chdir(here)
+        assert (outside / "inner" / "rel" / "g" / "g.main.film.picture.mp4").exists(), "nothing through a relative VD_OUT"
     finally:
         lean.OUTROOT = keep
 
@@ -701,10 +712,22 @@ def test_a_failed_export_never_removes_a_cut_already_filed():
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp)
         (out / "cuts").mkdir()
-        for name in ("draft[1]-cut1.mp4", "draft[1]-cut1-share.mp4", "draft[1]-cut1-sheet.jpg", "draft1-cut4.mp4"):
+        for name in ("draft[1]-cut1.mp4", "draft[1]-cut1-share.mp4", "draft[1]-cut1-sheet.jpg", "draft1-cut4.mp4", "Draft-cut1.mp4",
+                     "solo-cut2-share.mp4"):
             (out / "cuts" / name).write_bytes(b"filed")
         assert lean.cut_of(out, "draft[1]")[0] == 2 and lean.cut_of(out, "draft1")[0] == 5
+        # on Windows Draft-cut1.mp4 is draft-cut1.mp4: draft's next cut is 2 everywhere (a council's finding), and a
+        # number whose share copy is already there is passed over
+        assert lean.cut_of(out, "draft")[0] == 2 and lean.cut_of(out, "solo")[0] == 1
+        (out / "cuts" / "solo-cut1-share.mp4").write_bytes(b"filed")
+        assert lean.cut_of(out, "solo")[0] == 3
         assert [f.name for f in lean.sheets_of(out / "cuts" / "draft[1]-cut1.mp4")] == ["draft[1]-cut1-sheet.jpg"]
+        # where names differ only in case are one file (Windows, macOS), Draft's sheets are draft's: a re-export as Draft
+        # left draft's old sheets behind (a council's finding); on Linux they are another film's
+        (out / "draft-sheet_000.jpg").write_bytes(b"sheet")
+        import os as _os
+        blind = _os.name == "nt" or sys.platform == "darwin"
+        assert [f.name for f in lean.sheets_of(out / "Draft.mp4")] == (["draft-sheet_000.jpg"] if blind else []), blind
         # whatever the numbering says, what was there under the cut's names before the export stays when it fails
         dest = out / "draft[1].mp4"
 

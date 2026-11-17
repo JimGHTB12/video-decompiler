@@ -150,6 +150,22 @@ def test_each_story_tile_shows_the_frame_at_its_label():
                 for t, im in got:
                     shown, on = index_of(im), min(int(t * fps + 1e-6), n - 1)
                     assert shown == on, f"{fps} fps from {start} s: the tile labelled {t:.3f} s shows frame {shown}, not {on}"
+        # tiles are picked in batches, each from its own seek (one command for every tile was too long for Windows on a
+        # film over about 21 minutes): across batch boundaries each tile is still its frame
+        keep, pack.BATCH = pack.BATCH, 3
+        try:
+            got = pack.tiles(Path(tmp) / "count30.mp4", start=0.27)
+            assert len(got) == 16, len(got)
+            assert all(index_of(im) == int(t * 30 + 1e-6) for t, im in got), [(round(t, 2), index_of(im)) for t, im in got]
+        finally:
+            pack.BATCH = keep
+        # and at the batch size shipped, a film with more tiles than one batch: ffmpeg refused a select of 120 terms on a
+        # real 110 s film, which short test clips never reached
+        n = (pack.BATCH + 6) * 3              # at 6 fps, three frames a tile; the bands count to 342
+        numbered(Path(tmp) / "long.mp4", 6, n)
+        got = pack.tiles(Path(tmp) / "long.mp4")
+        assert len(got) == pack.BATCH + 6, (len(got), pack.BATCH)
+        assert all(index_of(im) == int(t * 6 + 1e-6) for t, im in got), [(round(t, 2), index_of(im)) for t, im in got][:6]
 
 
 def test_ours_alone_has_ten_stretches_and_no_lineup_without_against():

@@ -464,7 +464,7 @@ def sheets_of(film):
     """FILM's timed sheets beside it, NAME-sheet.jpg or NAME-sheet_NNN.jpg, matched as text: a glob built from the name
     took another film's sheets when the name held [ or ? (draft[1] matched draft1), a review's finding."""
     film = Path(film)
-    own = re.compile(re.escape(film.stem) + r"-sheet(_\d+)?\.jpg")
+    own = re.compile(re.escape(film.stem) + r"-sheet(_\d+)?\.jpg", CASE)
     return sorted(f for f in film.parent.iterdir() if own.fullmatch(f.name)) if film.parent.is_dir() else []
 
 
@@ -1409,15 +1409,23 @@ def export_frames(s, entry, comp):
 
 
 CUT = re.compile(r"(.+)-cut(\d+)\.mp4")
+# names that differ only in case are one file on Windows and macOS: matched without case there, so a re-export as Draft
+# found draft's sheets (a council's finding); on Linux they are two files and two films
+CASE = re.IGNORECASE if os.name == "nt" or sys.platform == "darwin" else 0
 
 
 def cut_of(out, stem):
     """(N, path) of the next cut of `stem`: OUT/cuts/STEM-cutN.mp4, N one past the highest there, names matched as text.
     A glob built from the name missed draft[1]'s cuts (the [1] read as a set of characters), so cut 1 was given again,
-    and the failed export's rollback deleted the cut already filed under it (a review's finding)."""
+    and the failed export's rollback deleted the cut already filed under it (a review's finding). Names are compared
+    without case, and a number whose names are taken is passed over: on Windows Draft-cut1.mp4 is draft-cut1.mp4, so
+    draft's cut 1 was written over it (a council's finding)."""
     cuts = out / "cuts"
-    have = [int(m.group(2)) for f in (cuts.iterdir() if cuts.is_dir() else ()) if (m := CUT.fullmatch(f.name)) and m.group(1) == stem]
+    have = [int(m.group(2)) for f in (cuts.iterdir() if cuts.is_dir() else ())
+            if (m := CUT.fullmatch(f.name)) and m.group(1).casefold() == stem.casefold()]
     n = max(have, default=0) + 1
+    while (cuts / f"{stem}-cut{n}.mp4").exists() or (cuts / f"{stem}-cut{n}-share.mp4").exists():
+        n += 1
     return n, cuts / f"{stem}-cut{n}.mp4"
 
 
@@ -1584,6 +1592,8 @@ def _export(a, cut=None, done=None):
         trimmed = held_under_peak(pic, wav, part)
         if trimmed:
             said.append(trimmed)
+        if cut.exists():   # never written over: a filed cut is the ledger's (it cannot be here unless cut_of was wrong)
+            raise SystemExit(f"stopped: {cut} is already there, so this export's film was not filed over it; nothing was replaced")
         part.replace(cut)
     share, sheets = hand_in(cut)
     done["cut"] = True
@@ -2044,7 +2054,7 @@ def _cut_files(o, stem, n):
     copy, its sheets, a part left by a stopped export). A glob built from the name took a sibling film's cut when the
     name held [ or ? (film[1] matched film1); and any NAME-cutN-* took film-cut1-alt's only cut as film's cut 1's (both
     a review's findings)."""
-    own = re.compile(re.escape(f"{stem}-cut{n}") + r"(\.mp4|\.part\.mp4|-share\.mp4|-sheet(_\d+)?\.jpg)")
+    own = re.compile(re.escape(f"{stem}-cut{n}") + r"(\.mp4|\.part\.mp4|-share\.mp4|-sheet(_\d+)?\.jpg)", CASE)
     return [f for f in (o / "cuts").iterdir() if f.is_file() and not _linked(f) and own.fullmatch(f.name)]
 
 
@@ -2102,7 +2112,8 @@ def cmd_clean(a):
             raise SystemExit("vd clean: --keep-cuts drops cuts of one film's folder at a time: name it (vd clean NAME --keep-cuts N)")
     if a.keep and a.keep_cuts is None:
         raise SystemExit("vd clean: --keep goes with --keep-cuts (plain clean never removes a cut)")
-    linked = next((q for q in (OUTROOT, *OUTROOT.parents) if _linked(q)), None)
+    root = Path(os.path.abspath(OUTROOT))   # a relative VD_OUT stopped the walk up at "." (a council's finding)
+    linked = next((q for q in (root, *root.parents) if _linked(q)), None)
     if linked is not None:
         # every file under a linked VD_OUT is reached through the link (a review's finding: a junction VD_OUT was listed)
         raise SystemExit(f"vd clean: {linked} is a link (to {linked.resolve()}), and clean never works through a link, so nothing was looked at. "

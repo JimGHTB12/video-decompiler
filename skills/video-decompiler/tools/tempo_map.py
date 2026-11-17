@@ -129,8 +129,9 @@ def fit(times, weights, duration, prior=None, bounds=None):
     if prior is not None and not LOWEST <= prior <= HIGHEST:
         # its search band (the prior +-3%) lay wholly outside the range, so nothing was searched and the fit crashed
         other = prior / 2 if prior > HIGHEST else prior * 2
-        raise ValueError(f"a tempo of {prior:g} BPM is outside the {LOWEST:g} to {HIGHEST:g} BPM this reads; give the same beat "
-                         f"counted at {'half' if prior > HIGHEST else 'double'} speed, {other:g} BPM")
+        hint = (f"; give the same beat counted at {'half' if prior > HIGHEST else 'double'} speed, {other:g} BPM"
+                if LOWEST <= other <= HIGHEST else "; give the beat as you count it within that range")   # 20 -> 40 is out too
+        raise ValueError(f"a tempo of {prior:g} BPM is outside the {LOWEST:g} to {HIGHEST:g} BPM this reads{hint}")
     if len(times) < 6:
         raise ValueError("fewer than six strong attacks: no measurable beat grid")
     if bounds:
