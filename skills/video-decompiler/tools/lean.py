@@ -1975,22 +1975,28 @@ def _size(p):
 
 def _rebuilt(o):
     """The files of output folder O that an export makes again: its own export, share copy and cuts are never among
-    them, though a film folder called NAME.picture exports NAME.picture.mp4 (a review's finding)."""
+    them, though a film folder called NAME.picture exports NAME.picture.mp4 (a review's finding). A picture is one an
+    export drew only when the note of what it was drawn from lies beside it: `vd export -o OUT/custom.picture.mp4` is a
+    finished film with no such note, and plain clean had removed it (a review's finding)."""
     own = {f"{o.name}.mp4".lower(), f"{o.name}-share.mp4".lower()}
     out = []
     for pat in REBUILT:
         for f in o.glob(pat):
-            if f.is_file() and not _linked(f) and f.name.lower() not in own:
-                out.append(f)
+            if not f.is_file() or _linked(f) or f.name.lower() in own:
+                continue
+            if f.name.lower().endswith(".picture.mp4") and not picture_note(f).is_file():
+                continue
+            out.append(f)
     return out
 
 
 def _cut_files(o, stem, n):
-    """Cut N of the film STEM in O/cuts: NAME-cutN.mp4 and NAME-cutN-*, matched as text. A glob built from the name took
-    a sibling film's cut when the name held [ or ? (film[1] matched film1), a review's finding."""
-    pre = f"{stem}-cut{n}"
-    return [f for f in (o / "cuts").iterdir()
-            if f.is_file() and not _linked(f) and (f.name.startswith(pre + ".") or f.name.startswith(pre + "-"))]
+    """Cut N of the film STEM in O/cuts, matched as text: NAME-cutN.mp4 and what an export writes beside it (its share
+    copy, its sheets, a part left by a stopped export). A glob built from the name took a sibling film's cut when the
+    name held [ or ? (film[1] matched film1); and any NAME-cutN-* took film-cut1-alt's only cut as film's cut 1's (both
+    a review's findings)."""
+    own = re.compile(re.escape(f"{stem}-cut{n}") + r"(\.mp4|\.part\.mp4|-share\.mp4|-sheet(_\d+)?\.jpg)")
+    return [f for f in (o / "cuts").iterdir() if f.is_file() and not _linked(f) and own.fullmatch(f.name)]
 
 
 def clean_plan(o, keep_cuts=None, keep=()):
@@ -2077,7 +2083,10 @@ def cmd_clean(a):
         try:
             with held(o, "clean"):
                 # what goes is decided again under the lock: the folder may have changed since it was listed
+                left = set()   # pictures that stayed keep their notes, so a later clean still knows them as drawn
                 for f, b, _ in clean_plan(o, a.keep_cuts, keep):
+                    if f.name.endswith(".picture.mp4.sources.json") and f.name[:-len(".sources.json")] in left:
+                        continue
                     try:
                         f.unlink()
                         freed += b
@@ -2085,6 +2094,7 @@ def cmd_clean(a):
                         pass
                     except OSError as e:   # open in a player, say: kept, and the rest still goes
                         stuck.append(f"{f.relative_to(OUTROOT)} ({e.strerror or e})")
+                        left.add(f.name)
         except Busy as e:
             busy.append(f"{o.name} ({str(e) or 'in use'})")
     if not a.yes:

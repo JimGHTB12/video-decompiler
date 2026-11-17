@@ -493,6 +493,7 @@ def test_clean_lists_first_and_removes_only_what_is_made_again():
         assert (o / "cuts/f-cut1.mp4").exists() and (o / "cuts/f-cut10.mp4").exists() and not (o / "cuts/f-cut2.mp4").exists()
         # a folder an export holds is skipped, not cleared under it
         (o / "f.main.film.picture.mp4").write_bytes(b"x")
+        (o / "f.main.film.picture.mp4.sources.json").write_text("{}", encoding="utf-8")
         with lean.held(o, "export"):
             code, said = _clean("--yes")
             assert (o / "f.main.film.picture.mp4").exists() and "in use" in said, said
@@ -510,7 +511,14 @@ def test_clean_matches_names_as_text_and_keeps_a_films_own_export():
         q = __import__("os").name != "nt"   # Windows does not allow ? in a file name; [ it does
         for name in ("film[1]-cut1.mp4", "film[1]-cut2.mp4", "film1-cut1.mp4") + (("film?-cut1.mp4", "film?-cut2.mp4") if q else ()):
             (o / "cuts" / name).write_bytes(b"film")
+        # cut 1 of foo goes with what an export wrote beside it, and foo-cut1-alt's only cut is not one of them
+        foo1 = ["foo-cut1.mp4", "foo-cut1-share.mp4", "foo-cut1-sheet.jpg", "foo-cut1-sheet_000.jpg", "foo-cut1.part.mp4"]
+        for name in foo1 + ["foo-cut2.mp4", "foo-cut1-alt-cut1.mp4", "foo-cut1-alt-cut1-share.mp4"]:
+            (o / "cuts" / name).write_bytes(b"film")
         _clean("f", "--keep-cuts", "1", "--yes")
+        assert not any((o / "cuts" / n).exists() for n in foo1), "foo's cut 1 and its companions go"
+        assert all((o / "cuts" / n).exists() for n in ("foo-cut2.mp4", "foo-cut1-alt-cut1.mp4", "foo-cut1-alt-cut1-share.mp4")), \
+            "foo-cut1-alt's only cut stays"
         assert (o / "cuts/film1-cut1.mp4").exists(), "film1's only cut stays"
         assert not (o / "cuts/film[1]-cut1.mp4").exists() and (o / "cuts/film[1]-cut2.mp4").exists()
         if q:
@@ -520,8 +528,12 @@ def test_clean_matches_names_as_text_and_keeps_a_films_own_export():
         (p / "x.picture.mp4").write_bytes(b"the export")
         (p / "x.picture-share.mp4").write_bytes(b"its share copy")
         (p / "x.picture.main.film.picture.mp4").write_bytes(b"made again")
+        (p / "x.picture.main.film.picture.mp4.sources.json").write_text("{}", encoding="utf-8")
+        # vd export -o OUT/custom.picture.mp4 is a finished film: no note says an export drew it, so it stays
+        (p / "custom.picture.mp4").write_bytes(b"a finished film")
         _clean("--yes")
         assert (p / "x.picture.mp4").exists() and (p / "x.picture-share.mp4").exists(), "the film's own export stays"
+        assert (p / "custom.picture.mp4").exists(), "a finished film named like a picture stays"
         assert not (p / "x.picture.main.film.picture.mp4").exists()
     finally:
         lean.OUTROOT = keep
@@ -562,6 +574,7 @@ def test_clean_orphans_are_named_never_removed():
         for rel in held_things:
             (o / rel).write_bytes(b"keep me")
         (o / "gone.main.film.picture.mp4").write_bytes(b"made again")
+        (o / "gone.main.film.picture.mp4.sources.json").write_text("{}", encoding="utf-8")
         code, said = _clean("--orphans", "--yes")
         assert "no-such-film is not there" in said, said
         assert all((o / r).exists() for r in held_things), "an orphan folder keeps everything but what is made again"
@@ -582,9 +595,15 @@ def test_clean_skips_a_file_open_elsewhere_and_goes_on():
         b.mkdir()
         (a / "a.main.film.picture.mp4").write_bytes(b"open")
         (b / "b.main.film.picture.mp4").write_bytes(b"closed")
+        for f in (a / "a.main.film.picture.mp4", b / "b.main.film.picture.mp4"):
+            f.with_name(f.name + ".sources.json").write_text("{}", encoding="utf-8")
         with open(a / "a.main.film.picture.mp4", "rb"):
             code, said = _clean("--yes")
         assert code == 0 and "open elsewhere" in said and not (b / "b.main.film.picture.mp4").exists(), said
+        assert (a / "a.main.film.picture.mp4.sources.json").exists(), "the open picture keeps its note"
+        assert not (b / "b.main.film.picture.mp4.sources.json").exists()
+        code, said = _clean("--yes")   # closed now, it is still known as drawn and goes
+        assert not (a / "a.main.film.picture.mp4").exists(), said
     finally:
         lean.OUTROOT = keep
 

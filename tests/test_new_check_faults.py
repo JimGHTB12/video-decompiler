@@ -10,6 +10,7 @@ capture: with no command given, nothing is shown as having run; the folder's own
 """
 import contextlib
 import io
+import os
 import re
 import subprocess
 import sys
@@ -480,7 +481,8 @@ def test_vd_borrow_says_what_it_wrote():
     with tempfile.TemporaryDirectory() as tmp:
         film, _, _, _, said = borrow_planted(tmp, {})
     lines = said.strip().splitlines()
-    assert lines and lines[-1] == str(film), ("the last line is still the folder", lines[-3:])
+    # the folder as borrow resolved it: a Mac's temporary folder under /var is a link to /private/var
+    assert lines and os.path.realpath(lines[-1]) == os.path.realpath(film), ("the last line is still the folder", lines[-3:])
     for what in ("dna.json", "dna.gen.ts", "REFERENCE.md", "grounds", "spring"):
         assert what in said, (what, said)
 
