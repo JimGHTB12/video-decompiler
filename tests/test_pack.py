@@ -119,6 +119,55 @@ def test_a_lineup_of_four_films_under_dealt_letters():
             assert "up to 3" in str(e), e
 
 
+def test_each_story_tile_shows_the_frame_at_its_label():
+    # broke: ffmpeg's fps filter keeps the last frame of each half second centred on a tick, so the tile labelled 31.00 s
+    # showed the frame at 31.167 (and 0.00 showed 0.208): a cut read off a story tile was read in the wrong shot. Then
+    # round=up was still a frame out, and from a start between frames a whole tile late: a pack from 9.008 s showed frame
+    # 570 twice where 540 was on screen (a review's finding). Each frame carries its number in three bands of base-7
+    # digits, which survive the encode and the scale to a tile.
+    import numpy as np
+    def numbered(path, fps, n):
+        frames = np.zeros((n, 36, 63), np.uint8)
+        for i in range(n):
+            for k, d in enumerate((i // 49, (i // 7) % 7, i % 7)):
+                frames[i, :, k * 21:(k + 1) * 21] = 20 + 33 * d
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "gray", "-s", "63x36", "-r", str(fps), "-i", "-",
+                        "-c:v", "libx264", "-qp", "0", "-pix_fmt", "yuv444p", str(path)], input=frames.tobytes(), check=True)
+    def index_of(im):
+        g = np.asarray(im.convert("L"), float)
+        w = g.shape[1] // 3
+        d = [int(round((float(np.median(g[4:-4, k * w + 8:(k + 1) * w - 8])) - 20) / 33)) for k in range(3)]
+        return d[0] * 49 + d[1] * 7 + d[2]
+    with tempfile.TemporaryDirectory() as tmp:
+        for fps in (24, 30, 60):
+            n = 240
+            clip = Path(tmp) / f"count{fps}.mp4"
+            numbered(clip, fps, n)
+            for start in (0.0, 0.5, 0.27, 1.008, 2.0167, 3.3333, n / fps - 1.0):
+                got = pack.tiles(clip, start=start, length=1.5)
+                want = len([k for k in range(4) if start + k / 2 < min(start + 1.5, n / fps) - 1e-9])
+                assert len(got) == want, f"{fps} fps from {start} s: {len(got)} tiles, not {want}"
+                for t, im in got:
+                    shown, on = index_of(im), min(int(t * fps + 1e-6), n - 1)
+                    assert shown == on, f"{fps} fps from {start} s: the tile labelled {t:.3f} s shows frame {shown}, not {on}"
+        # tiles are picked in batches, each from its own seek (one command for every tile was too long for Windows on a
+        # film over about 21 minutes): across batch boundaries each tile is still its frame
+        keep, pack.BATCH = pack.BATCH, 3
+        try:
+            got = pack.tiles(Path(tmp) / "count30.mp4", start=0.27)
+            assert len(got) == 16, len(got)
+            assert all(index_of(im) == int(t * 30 + 1e-6) for t, im in got), [(round(t, 2), index_of(im)) for t, im in got]
+        finally:
+            pack.BATCH = keep
+        # and at the batch size shipped, a film with more tiles than one batch: ffmpeg refused a select of 120 terms on a
+        # real 110 s film, which short test clips never reached
+        n = (pack.BATCH + 6) * 3              # at 6 fps, three frames a tile; the bands count to 342
+        numbered(Path(tmp) / "long.mp4", 6, n)
+        got = pack.tiles(Path(tmp) / "long.mp4")
+        assert len(got) == pack.BATCH + 6, (len(got), pack.BATCH)
+        assert all(index_of(im) == int(t * 6 + 1e-6) for t, im in got), [(round(t, 2), index_of(im)) for t, im in got][:6]
+
+
 def test_ours_alone_has_ten_stretches_and_no_lineup_without_against():
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)

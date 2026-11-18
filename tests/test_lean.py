@@ -420,6 +420,402 @@ def test_every_command_ends_on_the_path_it_made():
         assert "made_it(" in body, f"{cmd} doesn't say what it made"
 
 
+def _clean(*args):
+    import io
+    import contextlib
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        code = lean.main(["clean", *args])
+    return code, out.getvalue()
+
+
+def _out_root():
+    root = Path(tempfile.mkdtemp())
+    keep, lean.OUTROOT = lean.OUTROOT, root / "out"
+    lean.OUTROOT.mkdir()
+    return root, keep
+
+
+def _refused(*args):
+    try:
+        _clean(*args)
+    except SystemExit:
+        return True
+    return False
+
+
+def _drawn(pic, data=b"x" * 1000):
+    """A picture as an export leaves it: the file, and its note recording what was drawn."""
+    pic.write_bytes(data)
+    lean.picture_note(pic).write_text(json.dumps({"files": {}, "drawn": lean.drawn_record(pic)}), encoding="utf-8")
+    return pic
+
+
+def test_clean_lists_first_and_removes_only_what_is_made_again():
+    # ~/.vd/out grew without end (13 GB in 107 folders on the laptop these films were made on): vd clean lists what an
+    # export makes again, removes it only with --yes, and never a finished cut, a share copy, a sheet or a note
+    root, keep = _out_root()
+    try:
+        film = root / "film"
+        film.mkdir()
+        o = lean.OUTROOT / "f"
+        (o / "cuts").mkdir(parents=True)
+        (o / "sub").mkdir()
+        (o / "frames").mkdir()
+        (o / lean.OWNER).write_text(str(film) + "\n", encoding="utf-8")
+        rebuilt = ["f.main.film.picture.mp4", "f.main.film.picture.mp4.sources.json", "f.main.film.picture.part.render.json"]
+        # a finished film in sub/ (Linden's linden-sub.mp4 is one), frames nothing remakes, and what vd sound writes
+        # without the lock all stay: plain clean had removed them (a review's finding)
+        kept = ["f.mp4", "f-share.mp4", "scan.txt", "sound.wav", "sound-raw.wav", "GAP.md", "pack-1-KEY.txt",
+                "sub/f-sub.mp4", "frames/frame-00001.png", "look.jpg.render.json"]
+        cuts = [f"cuts/{stem}-cut{n}{tail}" for stem in ("f", "g") for n in (1, 2, 10) for tail in (".mp4", "-share.mp4", "-sheet_000.jpg")]
+        for rel in rebuilt + kept + cuts:
+            (o / rel).write_bytes(b"x" * 1000)
+        _drawn(o / "f.main.film.picture.mp4")
+        code, said = _clean()
+        assert code == 0 and all((o / r).exists() for r in rebuilt + kept + cuts), "without --yes nothing goes"
+        assert "f.main.film.picture.mp4" in said and "-cut" not in said, said
+        _clean("--yes")
+        assert not any((o / r).exists() for r in rebuilt), "what is made again goes"
+        assert all((o / r).exists() for r in kept + cuts), "cuts, exports, scans, the mix and notes stay"
+        # cuts are dropped one named folder at a time, and --keep goes with --keep-cuts and names a cut that is there
+        assert _refused("--keep-cuts", "2", "--yes"), "--keep-cuts across every folder"
+        (lean.OUTROOT / "g2").mkdir()
+        assert _refused("f", "g2", "--keep-cuts", "2", "--yes"), "--keep-cuts across two named folders"
+        (o / "cuts" / "f-cut99.mp4").mkdir()   # a folder named like a cut is no cut to keep
+        assert _refused("f", "--keep-cuts", "1", "--keep", "99", "--yes"), "--keep of a folder named like a cut"
+        (o / "cuts" / "f-cut99.mp4").rmdir()
+        assert _refused("f", "--keep", "1", "--yes"), "--keep without --keep-cuts"
+        assert _refused("f", "--keep-cuts", "1", "--keep", "20", "--yes"), "--keep of a cut that is not there"
+        for bad in ("0", "-1"):
+            assert _refused("f", "--keep-cuts", bad, "--yes"), f"--keep-cuts {bad}"
+        assert all((o / r).exists() for r in cuts), "a refused run removes nothing"
+        # --keep-cuts 2 keeps each film name's two newest: 2 and 10 of f and of g (cut 1's files are not cut 10's)
+        _clean("f", "--keep-cuts", "2", "--yes")
+        for stem in ("f", "g"):
+            assert not any((o / f"cuts/{stem}-cut1{t}").exists() for t in (".mp4", "-share.mp4", "-sheet_000.jpg")), stem
+            assert all((o / f"cuts/{stem}-cut{n}{t}").exists() for n in (2, 10) for t in (".mp4", "-share.mp4", "-sheet_000.jpg")), stem
+        # --keep protects a cut whatever its age
+        (o / "cuts/f-cut1.mp4").write_bytes(b"accepted")
+        _clean("f", "--keep-cuts", "1", "--keep", "1", "--yes")
+        assert (o / "cuts/f-cut1.mp4").exists() and (o / "cuts/f-cut10.mp4").exists() and not (o / "cuts/f-cut2.mp4").exists()
+        # a folder an export holds is skipped, not cleared under it
+        _drawn(o / "f.main.film.picture.mp4")
+        with lean.held(o, "export"):
+            code, said = _clean("--yes")
+            assert (o / "f.main.film.picture.mp4").exists() and "in use" in said, said
+    finally:
+        lean.OUTROOT = keep
+
+
+def test_clean_matches_names_as_text_and_keeps_a_films_own_export():
+    # broke: a cut's files were found with a glob built from the film's name, so film[1]'s old cut took film1's only
+    # cut; and a film folder called x.picture exports x.picture.mp4, which matched the pattern of what is made again
+    root, keep = _out_root()
+    try:
+        o = lean.OUTROOT / "f"
+        (o / "cuts").mkdir(parents=True)
+        q = __import__("os").name != "nt"   # Windows does not allow ? in a file name; [ it does
+        for name in ("film[1]-cut1.mp4", "film[1]-cut2.mp4", "film1-cut1.mp4") + (("film?-cut1.mp4", "film?-cut2.mp4") if q else ()):
+            (o / "cuts" / name).write_bytes(b"film")
+        # cut 1 of foo goes with what an export wrote beside it, and foo-cut1-alt's only cut is not one of them
+        foo1 = ["foo-cut1.mp4", "foo-cut1-share.mp4", "foo-cut1-sheet.jpg", "foo-cut1-sheet_000.jpg", "foo-cut1.part.mp4"]
+        for name in foo1 + ["foo-cut2.mp4", "foo-cut1-alt-cut1.mp4", "foo-cut1-alt-cut1-share.mp4"]:
+            (o / "cuts" / name).write_bytes(b"film")
+        _clean("f", "--keep-cuts", "1", "--yes")
+        assert not any((o / "cuts" / n).exists() for n in foo1), "foo's cut 1 and its companions go"
+        assert all((o / "cuts" / n).exists() for n in ("foo-cut2.mp4", "foo-cut1-alt-cut1.mp4", "foo-cut1-alt-cut1-share.mp4")), \
+            "foo-cut1-alt's only cut stays"
+        assert (o / "cuts/film1-cut1.mp4").exists(), "film1's only cut stays"
+        assert not (o / "cuts/film[1]-cut1.mp4").exists() and (o / "cuts/film[1]-cut2.mp4").exists()
+        if q:
+            assert not (o / "cuts/film?-cut1.mp4").exists() and (o / "cuts/film?-cut2.mp4").exists()
+        p = lean.OUTROOT / "x.picture"
+        p.mkdir()
+        (p / "x.picture.mp4").write_bytes(b"the export")
+        (p / "x.picture-share.mp4").write_bytes(b"its share copy")
+        _drawn(p / "x.picture.main.film.picture.mp4")
+        # the film's own export, even beside a note: a note that does not record this very file does not make it a picture
+        lean.picture_note(p / "x.picture.mp4").write_text(json.dumps({"files": {}, "drawn": {"size": 1, "mtime_ns": 1}}), encoding="utf-8")
+        # vd export -o OUT/custom.picture.mp4 is a finished film: no note says an export drew it, so it stays
+        (p / "custom.picture.mp4").write_bytes(b"a finished film")
+        # a finished film published at a former picture's name, its old note still there: it stays (a review's finding)
+        _drawn(p / "y.main.film.picture.mp4", b"the old picture")
+        (p / "film.mp4").write_bytes(b"a finished film, longer than the picture")
+        lean.publish(p / "film.mp4", p / "y.main.film.picture.mp4")
+        code, said = _clean("--yes")
+        assert (p / "x.picture.mp4").exists() and (p / "x.picture-share.mp4").exists(), "the film's own export stays"
+        assert (p / "custom.picture.mp4").exists(), "a finished film named like a picture stays"
+        assert (p / "y.main.film.picture.mp4").read_bytes() == b"a finished film, longer than the picture", "a film published over a picture stays"
+        assert not (p / "x.picture.main.film.picture.mp4").exists()
+        assert "left 3 *.picture.mp4" in said, said
+    finally:
+        lean.OUTROOT = keep
+
+
+def test_clean_never_reaches_outside_its_folder():
+    # broke: `vd clean ../outside --yes` cleaned a folder beside VD_OUT, and a linked folder took it anywhere
+    import os
+    import subprocess
+    root, keep = _out_root()
+    try:
+        outside = root / "outside"
+        outside.mkdir()
+        (outside / "f").mkdir()
+        _drawn(outside / "film.main.film.picture.mp4", b"precious")     # drawn: a clean that went there would take it
+        _drawn(outside / "f" / "f.main.film.picture.mp4", b"precious")
+        for name in ("../outside", str(outside), "..", "a/b"):
+            assert _refused(name, "--yes"), f"{name} was taken"
+        link = lean.OUTROOT / "linked"
+        if os.name == "nt":
+            subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(outside)], capture_output=True, check=True)
+        else:
+            os.symlink(outside, link)
+        _clean("--yes")
+        assert _refused("linked", "--yes"), "a linked folder named is refused"
+        assert (outside / "film.main.film.picture.mp4").exists(), "nothing through a link"
+        # VD_OUT itself a link: everything under it is through the link, named or not (a review's finding)
+        lean.OUTROOT = root / "linked-out"
+        if os.name == "nt":
+            subprocess.run(["cmd", "/c", "mklink", "/J", str(lean.OUTROOT), str(outside)], capture_output=True, check=True)
+        else:
+            os.symlink(outside, lean.OUTROOT)
+        assert _refused("--yes") and _refused("f", "--yes") and _refused(), "a linked VD_OUT is refused"
+        assert (outside / "f" / "f.main.film.picture.mp4").exists(), "nothing through a linked VD_OUT"
+        # a relative VD_OUT, from a folder reached through the link: the walk up stopped at "." (a council's finding).
+        # Windows keeps the junction in the current folder's path; Linux and macOS give the real folder, so there a
+        # relative VD_OUT crosses no link and is not refused
+        (outside / "inner" / "rel" / "g").mkdir(parents=True)
+        _drawn(outside / "inner" / "rel" / "g" / "g.main.film.picture.mp4", b"precious")
+        here = os.getcwd()
+        os.chdir(lean.OUTROOT / "inner")
+        try:
+            lean.OUTROOT = Path("rel")
+            if os.name == "nt":
+                assert _refused("--yes") and _refused(), "a relative VD_OUT under a link is refused"
+        finally:
+            os.chdir(here)
+        if os.name == "nt":
+            assert (outside / "inner" / "rel" / "g" / "g.main.film.picture.mp4").exists(), "nothing through a relative VD_OUT"
+        # link/.. in VD_OUT: the path as written passes through the link, though abspath folds it away (a council's finding)
+        lean.OUTROOT = root / "linked-out" / ".." / "outside"
+        assert _refused("--yes") and _refused(), "a VD_OUT that passes through a link is refused"
+        if os.name == "nt":
+            # a drive-relative VD_OUT (C:rel) while the current folder is on another drive: joined to that folder it
+            # stays C:rel, and only Windows's own resolution (the drive's current folder, here inside the junction)
+            # shows the link (a council's finding)
+            from unittest.mock import patch
+            os.chdir(root / "linked-out" / "inner")
+            try:
+                lean.OUTROOT = Path(Path(os.getcwd()).drive + "rel")
+                with patch("os.getcwd", lambda: r"Z:\elsewhere"):
+                    assert _refused("--yes") and _refused(), "a drive-relative VD_OUT under a link is refused"
+            finally:
+                os.chdir(here)
+    finally:
+        lean.OUTROOT = keep
+
+
+def test_clean_orphans_are_named_never_removed():
+    # broke: --orphans removed whole folders whose film folder read as gone: an unplugged drive, a moved project, a
+    # film saved as .MOV or .MP4 (not matched on Linux), and blind-read and evolve keys that nothing else holds
+    root, keep = _out_root()
+    try:
+        o = lean.OUTROOT / "gone"
+        (o / "cuts").mkdir(parents=True)
+        (o / lean.OWNER).write_text(str(root / "no-such-film") + "\n", encoding="utf-8")
+        held_things = ["final.MP4", "take.mov", "pack-1-KEY.txt", "evolve-1-KEY.txt", "sound.wav", "cuts/gone-cut1.mp4"]
+        for rel in held_things:
+            (o / rel).write_bytes(b"keep me")
+        _drawn(o / "gone.main.film.picture.mp4")
+        code, said = _clean("--orphans", "--yes")
+        assert "no-such-film is not there" in said, said
+        assert all((o / r).exists() for r in held_things), "an orphan folder keeps everything but what is made again"
+        assert not (o / "gone.main.film.picture.mp4").exists()
+    finally:
+        lean.OUTROOT = keep
+
+
+def test_clean_skips_a_file_open_elsewhere_and_goes_on():
+    # broke: a picture open in a player on Windows stopped clean with a traceback, and later folders were not cleaned
+    import os
+    if os.name != "nt":
+        return   # elsewhere an open file can be removed
+    root, keep = _out_root()
+    try:
+        a, b = lean.OUTROOT / "a", lean.OUTROOT / "b"
+        a.mkdir()
+        b.mkdir()
+        _drawn(a / "a.main.film.picture.mp4", b"open")
+        _drawn(b / "b.main.film.picture.mp4", b"closed")
+        with open(a / "a.main.film.picture.mp4", "rb"):
+            code, said = _clean("--yes")
+        assert code == 0 and "open elsewhere" in said and not (b / "b.main.film.picture.mp4").exists(), said
+        assert (a / "a.main.film.picture.mp4.sources.json").exists(), "the open picture keeps its note"
+        assert not (b / "b.main.film.picture.mp4.sources.json").exists()
+        code, said = _clean("--yes")   # closed now, it is still known as drawn and goes
+        assert not (a / "a.main.film.picture.mp4").exists(), said
+    finally:
+        lean.OUTROOT = keep
+
+
+def test_clean_removes_only_what_it_listed():
+    # broke: what goes was decided again under the lock and all of it removed, so a cut that finished between the list
+    # and the lock made cut 2 "older" and it went without being named (a review's finding); and a picture replaced in
+    # that moment must stay too
+    from contextlib import contextmanager
+    from unittest.mock import patch
+    root, keep = _out_root()
+    try:
+        o = lean.OUTROOT / "f"
+        (o / "cuts").mkdir(parents=True)
+        for n in (1, 2):
+            (o / "cuts" / f"f-cut{n}.mp4").write_bytes(b"cut")
+        _drawn(o / "f.main.film.picture.mp4")
+        real = lean.held
+
+        @contextmanager
+        def meanwhile(folder, what):
+            (o / "cuts" / "f-cut3.mp4").write_bytes(b"cut 3, finished just now")
+            (o / "film.mp4").write_bytes(b"a finished film put at the picture's name")
+            lean.publish(o / "film.mp4", o / "f.main.film.picture.mp4")
+            with real(folder, what):
+                yield
+        with patch.object(lean, "held", meanwhile):
+            code, said = _clean("f", "--keep-cuts", "1", "--yes")
+        assert not (o / "cuts/f-cut1.mp4").exists(), "the listed cut goes"
+        assert (o / "cuts/f-cut2.mp4").exists() and "f-cut2.mp4" in said.split("not in the list above")[-1], said
+        assert (o / "f.main.film.picture.mp4").read_bytes().startswith(b"a finished film"), "a picture replaced since the list stays"
+    finally:
+        lean.OUTROOT = keep
+
+
+def test_takeover_moves_the_other_films_work_aside():
+    # broke: when B/Twin took over A/Twin's output folder, A's cuts stayed in cuts/ under the same name, so B's cut 2 made
+    # A's only cut "older" and vd clean Twin --keep-cuts 1 removed it; and takeover deleted a finished final.picture.mp4
+    # (a review's finding)
+    root, keep = _out_root()
+    try:
+        a, b = root / "A" / "Twin", root / "B" / "Twin"
+        a.mkdir(parents=True)
+        b.mkdir(parents=True)
+        o = lean.outdir(a)
+        (o / "cuts").mkdir()
+        (o / "bridge").mkdir()
+        for rel, data in (("cuts/Twin-cut1.mp4", b"A's only cut"), ("Twin.mp4", b"A's latest"), ("Twin-share.mp4", b"A's share"),
+                          ("Twin-sheet.jpg", b"A's sheet"), ("final.picture.mp4", b"A's finished film"), ("bridge/cues.xml", b"A's timeline"),
+                          ("sound.wav", b"A's built sound")):
+            (o / rel).write_bytes(data)
+        _drawn(o / "Twin.main.film.picture.mp4", b"A's drawn picture")
+        assert lean.outdir(b) == o
+        aside = o / "earlier-folder" / "1"
+        for rel in ("cuts/Twin-cut1.mp4", "Twin.mp4", "Twin-share.mp4", "Twin-sheet.jpg", "final.picture.mp4", "bridge/cues.xml"):
+            assert (aside / rel).exists() and not (o / rel).exists(), f"{rel} moved aside"
+        assert not (o / "Twin.main.film.picture.mp4").exists() and not (o / "sound.wav").exists(), "what an export makes again goes"
+        assert lean.cut_of(o, "Twin")[0] == 1, "B's cuts start again at 1"
+        (o / "cuts").mkdir()
+        for n in (1, 2):
+            (o / "cuts" / f"Twin-cut{n}.mp4").write_bytes(b"B's cut")
+        _clean("Twin", "--keep-cuts", "1", "--yes")
+        assert (aside / "cuts/Twin-cut1.mp4").read_bytes() == b"A's only cut", "A's cut is not B's to drop"
+        assert not (o / "cuts/Twin-cut1.mp4").exists() and (o / "cuts/Twin-cut2.mp4").exists()
+    finally:
+        lean.OUTROOT = keep
+
+
+def test_a_failed_export_never_removes_a_cut_already_filed():
+    # broke: cut_of globbed draft[1]-cut*.mp4, where [1] is a set of characters, so draft[1]'s cut 1 was not seen, cut 1
+    # was given again, and the failed export's rollback deleted the cut already filed (a review's finding)
+    import argparse
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp)
+        (out / "cuts").mkdir()
+        for name in ("draft[1]-cut1.mp4", "draft[1]-cut1-share.mp4", "draft[1]-cut1-sheet.jpg", "draft1-cut4.mp4", "Draft-cut1.mp4",
+                     "solo-cut2-share.mp4"):
+            (out / "cuts" / name).write_bytes(b"filed")
+        assert lean.cut_of(out, "draft[1]")[0] == 2 and lean.cut_of(out, "draft1")[0] == 5
+        # does this filesystem keep names that differ only in case apart? found by writing one and looking for the other
+        probe = out / "CaseProbe.txt"
+        probe.write_bytes(b"x")
+        blind = (out / "caseprobe.txt").exists()
+        probe.unlink()
+        # clean groups cuts by the name as written: never two films as one (STRASSE and Straße are two on Windows, and
+        # grouping without case removed one's only cut: a council's finding); Draft and draft keep more than asked
+        o = out / "f"
+        (o / "cuts").mkdir(parents=True)
+        for name in ("Draft-cut1.mp4", "draft-cut2.mp4", "draft-cut3.mp4", "STRASSE-cut1.mp4", "Straße-cut2.mp4"):
+            (o / "cuts" / name).write_bytes(b"cut")
+        gone = sorted(f.name for f, _, _ in lean.clean_plan(o, keep_cuts=1))
+        assert gone == ["draft-cut2.mp4"], gone
+        # on Windows Draft-cut1.mp4 is draft-cut1.mp4, so draft's next cut is 2 there (a council's finding); where names
+        # keep their case (Linux, a case-sensitive Mac volume) Draft is another film and draft's next cut is 1. And a
+        # number whose share copy is already there is passed over
+        assert lean.cut_of(out, "draft")[0] == (2 if blind else 1) and lean.cut_of(out, "solo")[0] == 1
+        assert lean.cut_of(out, "Straße")[0] == 1, "STRASSE's cuts are not Straße's"
+        (out / "cuts" / "solo-cut1-share.mp4").write_bytes(b"filed")
+        assert lean.cut_of(out, "solo")[0] == 3
+        assert [f.name for f in lean.sheets_of(out / "cuts" / "draft[1]-cut1.mp4")] == ["draft[1]-cut1-sheet.jpg"]
+        # where names differ only in case are one file (Windows, macOS), Draft's sheets are draft's: a re-export as Draft
+        # left draft's old sheets behind (a council's finding); on Linux they are another film's
+        (out / "draft-sheet_000.jpg").write_bytes(b"sheet")
+        assert [f.name for f in lean.sheets_of(out / "Draft.mp4")] == (["draft-sheet_000.jpg"] if blind else []), blind
+        # in a folder whose own name swaps case badly (Straße -> sTRASSE), the filesystem is still asked file by file
+        # (a council's finding: the folder test said case-sensitive there and draft's sheets were missed)
+        u = out / "Straße"
+        u.mkdir()
+        (u / "draft-sheet_000.jpg").write_bytes(b"sheet")
+        (u / "STRASSE-sheet.jpg").write_bytes(b"another film's sheet")
+        assert [f.name for f in lean.sheets_of(u / "Draft.mp4")] == (["draft-sheet_000.jpg"] if blind else []), blind
+        assert [f.name for f in lean.sheets_of(u / "Straße.mp4")] == [], "STRASSE's sheet is not Straße's"
+        # a name Python's case-blind matching takes for another but the filesystem may keep apart: the Kelvin sign K
+        # matches k in a pattern without case, while Windows names Kiln and kiln as two files. The filesystem's
+        # own answer decides (macOS, which folds the sign to K, may say they are one)
+        (out / "kiln-sheet.jpg").write_bytes(b"kiln's sheet")
+        kelvin = out / "Kiln-sheet.jpg"
+        one = kelvin.exists() and __import__("os").path.samefile(kelvin, out / "kiln-sheet.jpg")
+        assert [f.name for f in lean.sheets_of(out / "Kiln.mp4")] == (["kiln-sheet.jpg"] if one else []), one
+        # whatever the numbering says, what was there under the cut's names before the export stays when it fails
+        dest = out / "draft[1].mp4"
+
+        def fails(a, cut=None, done=None):
+            cut.with_name(cut.stem + ".part.mp4").write_bytes(b"begun")
+            raise SystemExit("no sound")
+        with patch.object(lean, "export_paths", lambda a: (out, out / "film.tsx", None, None, out, dest)), \
+                patch.object(lean, "cut_of", lambda o, stem: (1, out / "cuts" / "draft[1]-cut1.mp4")), patch.object(lean, "_export", fails):
+            try:
+                lean.cmd_export(argparse.Namespace())
+                raise AssertionError("the export failed")
+            except SystemExit:
+                pass
+        for name in ("draft[1]-cut1.mp4", "draft[1]-cut1-share.mp4", "draft[1]-cut1-sheet.jpg"):
+            assert (out / "cuts" / name).read_bytes() == b"filed", f"{name} was removed"
+        assert not (out / "cuts" / "draft[1]-cut1.part.mp4").exists(), "what the export began is removed"
+
+
+def test_not_proven_commands_say_so_where_they_run():
+    # the newer commands were quarantined in prose only: each now says so on every run, and the list in the code is the
+    # list SKILL.md marks "not proven", so the two cannot drift apart
+    import re
+    import subprocess
+    skill = (TOOLS.parent / "SKILL.md").read_text(encoding="utf-8")
+    marked = set()
+    for line in skill.splitlines():
+        if re.match(r"\|\s*`vd ", line) and "| not proven" in line:
+            marked |= set(re.findall(r"`vd (\w+)", line.split("|")[1]))
+    assert marked == lean.NOT_PROVEN, (marked, lean.NOT_PROVEN)
+    with tempfile.TemporaryDirectory() as tmp:
+        for cmd in sorted(lean.NOT_PROVEN):
+            # --help: said before the arguments are read, so a call that only asks for help hears it, and nothing is made
+            # (run bare, vd launch made a whole film folder in the folder the tests ran from)
+            p = subprocess.run([sys.executable, "-X", "utf8", str(TOOLS / "vd.py"), cmd, "--help"], capture_output=True, cwd=tmp,
+                               text=True, encoding="utf-8", env={**__import__("os").environ, "VD_OUT": tmp})
+            assert f"vd {cmd} is not proven on a film yet" in p.stderr, (cmd, p.stderr)
+        p = subprocess.run([sys.executable, "-X", "utf8", str(TOOLS / "vd.py"), "clean"], capture_output=True, text=True,
+                           encoding="utf-8", env={**__import__("os").environ, "VD_OUT": tmp})
+        assert "not proven" not in p.stderr, "a proven command says nothing"
+
+
 def test_steal_still_runs_as_borrow():
     # 0.2.0 called vd borrow vd steal: a person's `vd steal` still runs, through the front door, and says the new name
     import subprocess
@@ -974,7 +1370,9 @@ def test_a_folder_taking_over_a_name_does_not_inherit_the_other_films_latest_cut
                 (o / name).write_bytes(data)
             assert lean.outdir(b) == o
             left = sorted(p.relative_to(o).as_posix() for p in o.rglob("*") if p.is_file() and p.name not in (lean.OWNER, "exporting.lock"))
-            assert left == ["cuts/shared-cut1.mp4", "earlier-folder/1/evolve-1-KEY.txt"], left
+            # the scan and sound notes are readings and go; the rest of the other film's work is moved aside, not deleted
+            aside = ["bridge/cues.json", "cuts/shared-cut1.mp4", "evolve-1-KEY.txt", "shared-share.mp4", "shared-sheet.jpg", "shared-sheet_000.jpg", "shared.mp4"]
+            assert left == [f"earlier-folder/1/{x}" for x in aside], left
             # a third folder taking the name over keeps both earlier keys (broke: the second replaced the first's)
             (o / "evolve-1-KEY.txt").write_bytes(b"key two")
             c = Path(tmp) / "three" / "shared"

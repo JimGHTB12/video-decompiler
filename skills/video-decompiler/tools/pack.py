@@ -22,7 +22,7 @@ summed over each second, the largest taken, never overlapping), drawn by sheet.p
 order, the time and frame number on every tile. A reader at four frames a second saw a story and no motion: a stutter or
 an ease is only visible frame by frame. --ref-first and --ref-last give only the first N and last M seconds of each
 --against film, and its stretches are picked inside them. Each --against film's material is made by this same code and
-cached beside its measures (~/.vd/measures/<its hash>/reader-...). No film's name is in any file name, text or picture
+cached beside its measures (~/.vd/measures/<its hash>-sheets2/reader-...). No film's name is in any file name, text or picture
 inside the pack. vd pin gives a reference alone the same material (reader_material).
 """
 import argparse
@@ -67,15 +67,40 @@ def tile_h(film):
     return max(1, int(W * v["h"] / v["w"] + 0.5))       # raw RGB frames need no even height
 
 
+BATCH = 48   # story tiles picked per ffmpeg call: ffmpeg's expression parser refuses a select of about 100 terms
+             # (120 failed on a 110 s film), and one command for a whole long film was too long for Windows
+
+
 def tiles(film, start=0.0, length=None, h=None):
-    """(time, picture) at FPS a second from `start`, for `length` seconds (all when None)."""
+    """(time, picture) at FPS a second from `start`, for `length` seconds (all when None), each the frame on screen at its
+    time: the last frame whose own time is at or before it, read from the file's packets. ffmpeg's fps filter picked
+    by its own rounding: half a second late centred on each tick (the tile labelled 31.00 s showed 31.167), and with
+    round=up still a frame out, and a whole tile late from a start between frames (a pack from 9.008 s showed frame 570
+    twice where 540 was on screen; a review's finding). The seek lands on the first frame wanted, as seek_to's do."""
+    import numpy as np
     from PIL import Image
+    from film_diff import clock, ffprobe
     h = h or tile_h(film)
-    cmd = ["ffmpeg", "-v", "error", "-ss", f"{start:.3f}", "-i", str(film)] + (["-t", f"{length:.3f}"] if length else []) + \
-          ["-vf", f"fps={FPS},scale={W}:{h}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
-    raw = subprocess.run(cmd, capture_output=True, check=True, creationflags=NO_WINDOW).stdout
-    n = len(raw) // (W * h * 3)
-    return [(start + k / FPS, Image.frombytes("RGB", (W, h), raw[k * W * h * 3:(k + 1) * W * h * 3])) for k in range(n)]
+    times = clock(film)
+    end = ffprobe(film)["duration"] if length is None else min(start + length, ffprobe(film)["duration"])
+    ticks = [start + k / FPS for k in range(int((end - start) * FPS) + 2) if start + k / FPS < end - 1e-9]
+    if not ticks:
+        return []
+    want = [max(0, int(np.searchsorted(times, t + 1e-6, side="right")) - 1) for t in ticks]
+    frames, got = sorted(set(want)), {}
+    # in batches, each from its own seek: one select of every tile's frame made a command line too long for Windows on
+    # a film over about 21 minutes (a council's finding)
+    for b in range(0, len(frames), BATCH):
+        part = frames[b:b + BATCH]
+        first = part[0]
+        ss = 0.0 if first == 0 else float(times[first - 1] + times[first]) / 2      # half way back: the seek lands on `first`
+        pick = "+".join(f"eq(n\\,{f - first})" for f in part)
+        cmd = ["ffmpeg", "-v", "error", "-ss", f"{ss:.6f}", "-i", str(film), "-vf", f"select='{pick}',scale={W}:{h}", "-fps_mode", "passthrough",
+               "-frames:v", str(len(part)), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+        raw = subprocess.run(cmd, capture_output=True, check=True, creationflags=NO_WINDOW).stdout
+        got.update({f: Image.frombytes("RGB", (W, h), raw[k * W * h * 3:(k + 1) * W * h * 3]) for k, f in enumerate(part)
+                    if (k + 1) * W * h * 3 <= len(raw)})
+    return [(t, got[f]) for t, f in zip(ticks, want) if f in got]
 
 
 STRIP = 24   # px: the band above each story tile that holds its time, so no stamp covers the picture
@@ -163,10 +188,18 @@ def file_hash(path):
     return h.hexdigest()[:16]
 
 
+SHEETS = 2   # bump when the sheets change, so a set cached the old way is made again (2: each story tile shows the frame at its time)
+
+
+def sheets_root(ref, cache_root=None):
+    """Where a reference's sheets are cached: beside its measures, under this version of the sheets."""
+    return Path(cache_root or Path.home() / ".vd" / "measures") / f"{file_hash(ref)}-sheets{SHEETS}"
+
+
 def ref_sheets(ref, first=None, last=None, cache_root=None, k=K):
     """The reference's story and motion sheets, made once by reader_material and kept beside its measures. Made in a
     folder of its own and moved into place whole, so a run stopped half way is never taken as made."""
-    root = Path(cache_root or Path.home() / ".vd" / "measures") / file_hash(ref)
+    root = sheets_root(ref, cache_root)
     folder = root / f"reader-{first or 'all'}-{last or 'all'}-k{k}"
     if not (folder / "story-01.jpg").exists():
         part = folder.with_name(folder.name + ".part")

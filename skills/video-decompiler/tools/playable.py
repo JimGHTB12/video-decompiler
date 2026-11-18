@@ -266,7 +266,7 @@ function boot() {
     const s = Math.min((wrap.clientWidth - 24) / W, (wrap.clientHeight - 24) / H);
     stage.style.width = W + "px";
     stage.style.height = H + "px";
-    stage.style.transform = `scale(${Math.max(0.1, s).toFixed(4)})`;
+    stage.style.transform = `scale(${Math.max(0.001, s).toFixed(4)})`;   // a 10% floor cropped the frame in a pane under 216 px (a review's finding)
   }
   window.addEventListener("resize", resizeStage);
   resizeStage();
@@ -450,13 +450,15 @@ def build_playable(film_dir: Path, entry: Path = None, out_dir: Path = None):
     # Copy media assets (art, sound.wav) so staticFile() and WebAudio resolve locally
     if (film_dir / "media").is_dir():
         shutil.copytree(film_dir / "media", out_dir / "media", dirs_exist_ok=True)
-    built_wav = lean.outdir(film_dir) / "sound.wav"
-    # the film's own media/sound.wav (copied above) wins; otherwise the mix vd sound built, copied on every build. The
-    # test was whether the playable already had a sound.wav, which it did from its first build, so a rebuilt mix never
-    # reached it and the new picture played against the old sound.
-    if built_wav.is_file() and not (film_dir / "media" / "sound.wav").is_file():
+    # the page plays the sound the export lays under the picture (lean.film_sound), copied on every build: the film's own
+    # media/sound.wav had won, so a film with a voice or a mapped track played its own mix alone (foley with no music),
+    # and an earlier rule kept a rebuilt mix from ever reaching a page built before it
+    s = lean.score_of(film_dir) if (film_dir / "score.json").is_file() else None
+    built_wav = lean.film_sound(film_dir, s)[0] if s else lean.outdir(film_dir) / "sound.wav"
+    if built_wav.is_file():
         (out_dir / "media").mkdir(parents=True, exist_ok=True)
-        shutil.copy2(built_wav, out_dir / "media" / "sound.wav")
+        if built_wav.resolve() != (out_dir / "media" / "sound.wav").resolve():
+            shutil.copy2(built_wav, out_dir / "media" / "sound.wav")
 
     html = f"""<!doctype html>
 <html lang="en">
@@ -472,7 +474,7 @@ def build_playable(film_dir: Path, entry: Path = None, out_dir: Path = None):
   button.active {{ background: #1f6feb; border-color: #388bfd; }}
   #vd-scrub {{ flex: 1; accent-color: #1f6feb; cursor: pointer; }}
   #vd-viewport {{ flex: 1; position: relative; display: flex; align-items: center; justify-content: center; overflow: hidden; }}
-  #vd-stage {{ position: relative; transform-origin: center center; box-shadow: 0 24px 80px rgba(0,0,0,0.65); overflow: hidden; }}
+  #vd-stage {{ flex: none; position: relative; transform-origin: center center; box-shadow: 0 24px 80px rgba(0,0,0,0.65); overflow: hidden; }}
   #vd-hud {{ position: absolute; left: 16px; top: 16px; background: rgba(13, 14, 17, 0.86); border: 1px solid #30363d; border-radius: 8px; padding: 10px 14px; font-family: ui-monospace, monospace; font-size: 12px; line-height: 1.6; pointer-events: none; backdrop-filter: blur(8px); }}
   #vd-inspector {{ padding: 6px 16px; background: #121418; border-top: 1px solid #282c34; font-family: ui-monospace, monospace; font-size: 12px; color: #8b949e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
 </style>

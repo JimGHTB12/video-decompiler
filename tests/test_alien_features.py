@@ -155,6 +155,25 @@ def test_foley_reads_aliased_camera_keys_writes_outside_the_film_and_refuses_a_m
             lean.OUTROOT = old
 
 
+def test_foley_mix_reports_the_level_it_wrote():
+    # broke: over a silent media/sound.wav, --mix said "blended into media/sound.wav (-15 LUFS)" and wrote -24.7 LUFS: the
+    # re-level is held to 6 dB and under -2.2 dBTP, and the note was a fixed string
+    import contextlib
+    import io
+    import re
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp) / "quiet-stet"
+        lean.main(["new", str(d), "--like", "stet"])
+        lean.write_wav(d / "media" / "sound.wav", np.zeros((int(lean.score_of(d)["duration"] * 48000), 2), np.float32))
+        said = io.StringIO()
+        with contextlib.redirect_stdout(said):
+            assert lean.main(["foley", "--mix", "--film", str(d)]) == 0
+        lufs, tp = lean.loudness(d / "media" / "sound.wav")
+        m = re.search(r"media/sound\.wav[^;]*?(-?\d+(?:\.\d+)?) LUFS", said.getvalue())
+        assert m and abs(float(m.group(1)) - float(lufs)) <= 0.2, ("it says the level it wrote", lufs, said.getvalue())
+        assert float(lufs) < -16 and "-15 LUFS)" not in said.getvalue(), (lufs, said.getvalue())
+
+
 def test_foley_synthesizes_physical_sound_from_telemetry():
     # Spectral centroid helper
     def centroid_hz(sig):
@@ -370,8 +389,11 @@ def test_playable_exports_interactive_runtime_twin():
         assert "\"baseFrequency\",\"numOctaves\",\"stdDeviation\"" in js, "SVG keeps its camelCase attribute names"
         assert ("loop>" in html) or ("<audio" not in html), "the sound loops with the picture"
         # a film whose sound comes from vd sound: a rebuilt mix reaches a rebuilt playable (the first build's copy had
-        # kept every later mix out)
+        # kept every later mix out). Its score.json names no own mix, as the export would refuse one that is missing
         (d / "media" / "sound.wav").unlink(missing_ok=True)
+        s = lean.score_of(d)
+        s.pop("sound_file", None)
+        (d / "score.json").write_text(json.dumps(s, indent=1) + "\n", encoding="utf-8")
         out_play2 = Path(tmp) / "playable-out-2"
         built = Path(lean.outdir(d)) / "sound.wav"
         built.parent.mkdir(parents=True, exist_ok=True)
@@ -382,6 +404,40 @@ def test_playable_exports_interactive_runtime_twin():
                 assert (out_play2 / "media" / "sound.wav").read_bytes() == built.read_bytes(), "the current mix"
         finally:
             built.unlink(missing_ok=True)
+
+
+def test_playable_fits_any_window_and_plays_the_films_whole_mix():
+    # broke: in a window narrower than 1920 px the stage, a flex item free to shrink, was squeezed to the window's width
+    # and then scaled, so the left half of the frame showed; and the page played media/sound.wav, the film's own mix
+    # alone, where the export lays the voice and a mapped track over it
+    if playable.find_esbuild() is None and playable.find_bun() is None:
+        print("skipped: neither esbuild nor bun is installed")
+        return
+    import re
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp) / "playable-mix"
+        lean.main(["new", str(d), "--like", "stet"])
+        t = np.arange(48000 * 2) / 48000.0
+        lean.write_wav(d / "media" / "voice-test.wav", np.repeat((0.2 * np.sin(2 * np.pi * 220 * t))[:, None], 2, axis=1).astype(np.float32))
+        s = lean.score_of(d)
+        s["voice"] = {"file": "media/voice-test.wav", "at": 1.0}
+        (d / "score.json").write_text(json.dumps(s, indent=1) + "\n", encoding="utf-8")
+        out_play = Path(tmp) / "play"
+        assert lean.main(["playable", "--film", str(d), "-o", str(out_play)]) == 0
+        html = (out_play / "index.html").read_text(encoding="utf-8")
+        stage = re.search(r"#vd-stage \{\{?([^}]*)\}", html).group(1)
+        assert "flex: none" in stage, ("the stage keeps its size and is only scaled", stage)
+        # scaled to the window by both sides, with no floor that crops a small pane (a 10% floor cropped any pane under
+        # 216 px, and a scale forced to 1 was not caught: a review's findings). This reads the page's source in playable.py,
+        # which the bundler rewrites; no browser runs.
+        src = Path(playable.__file__).read_text(encoding="utf-8")
+        fit = re.search(r"const s = Math\.min\(\(wrap\.clientWidth - 24\) / W, \(wrap\.clientHeight - 24\) / H\);", src)
+        floor = re.search(r"stage\.style\.transform = `scale\(\$\{Math\.max\(([\d.]+), s\)", src)
+        assert fit and floor and float(floor.group(1)) <= 0.01, ("the stage scales to fit the window, floored at no more than 1%", fit, floor)
+        played = out_play / re.search(r"<audio id='vd-audio' src='([^']+)'", html).group(1)
+        mix = lean.outdir(d) / "sound.wav"
+        assert mix.is_file() and played.read_bytes() == mix.read_bytes(), "the page plays the mix the export lays under the picture"
+        assert played.read_bytes() != (d / "media" / "sound.wav").read_bytes(), "not the film's own mix without its voice"
 
 
 def test_playable_builds_every_worked_film_against_its_raea_stand_in():

@@ -9,7 +9,7 @@ James Dimachkie directed this and judged it. Coding agents wrote it: the tools, 
 What was the person's:
 
 - the aim, the kinds of film, and which films by other makers were worth learning from;
-- watching the cuts of the four films alone, at speed, with the sound on, and saying what was wrong. Plus One took 6 cuts, Stet 10, Onoma 4, Linden 5;
+- watching cuts of the four films alone, at speed, with the sound on, and saying what was wrong. Plus One took 6 cuts, Stet 10, Onoma 4, Linden 5; the records keep what he said, not a viewing of every cut;
 - the rules the work ran under. No film reaches the person until blind readers have read it. Nothing ships that changes a film he accepted. Every report says what nobody did.
 
 What was the agents': everything typed, and the reviews of each other's work.
@@ -64,7 +64,7 @@ What the table shows:
 
 Tests 3 and 5 had the same model, the same paragraph and the same material. Only the skill differed: several pages were added between them. The second agent never saw the first film; its session log names no file outside its own folders. Both films open on the same question, use the same lines, and stage the same shot of a phone between two words.
 
-So running an agent again does not give a second idea. A different film has to come from different material or a different film to hold it against. This is one pair, not a rate.
+In this pair, running an agent again did not give a second idea, though several of the skill's pages had changed between the two. It suggests that a different film has to come from different material or a different film to hold it against. One pair is not a rate.
 
 The pair was then read blind by two readers from two families of model, with an accepted film in the same line-up and the letters dealt differently for each reader:
 
@@ -105,7 +105,7 @@ Since then `vd look` also reads the drawn pixels for one fault: text over a busy
 
 ## Tests, and what clean machines found
 
-There are 189 tests in 27 files. Most are built on an input with a fault planted in it; some of the newer commands' tests, in `test_alien_features.py`, check only that a command makes what it says on a clean input. Until the day before release they had run on one laptop only. Their first run on hosted machines failed on Linux and on Windows. Two tests had assumed things about that laptop: an optional package, and how a temp folder is spelled. One showed a real limit on Linux in a helper: a waiting job cannot always tell that the process that started it has gone. The tool's notes now say so.
+There are 210 tests in 27 files. Most are built on an input with a fault planted in it; some of the newer commands' tests, in `test_alien_features.py`, check only that a command makes what it says on a clean input. Until the day before release they had run on one laptop only. Their first run on hosted machines failed on Linux and on Windows. Two tests had assumed things about that laptop: an optional package, and how a temp folder is spelled. One showed a real limit on Linux in a helper: a waiting job cannot always tell that the process that started it has gone. The tool's notes now say so.
 
 On the day of release a model from another family than the one that wrote the tools reviewed their code. It found twelve bugs and five risks. The twelve are mended, eleven with a test. Three of the risks are mended too. A second review, of everything changed in the tools since the last tested release, found five more faults, all in code written that day; those are mended with tests of their own. The two risks left, both in the render queue, were mended on 16 November, each with a test; the one about a force-killed job runs only on macOS and Linux, so this laptop has not run it.
 

@@ -217,11 +217,11 @@ def stream(path, start, seconds, fps, times=None):
             if len(raw) < size:
                 break
             yield np.frombuffer(raw[:W * H], dtype=np.uint8).reshape(H, W).astype(np.float64)
-    finally:  # a caller that stops early (next(), break) closes the generator: end ffmpeg, or it keeps the file open
-        if p.poll() is None:
-            p.kill()
+    finally:  # a caller that stops early (next(), break) closes the generator: end ffmpeg, or it keeps the file open.
+        # The pipe is closed first and ffmpeg waited for: killed at once, a launcher (Chocolatey's ffmpeg on the hosted
+        # Windows runners) died and left the real ffmpeg holding the film (a council's finding)
         p.stdout.close()
-        p.wait()
+        stop_decoder(p)
 
 
 def blur8(x):

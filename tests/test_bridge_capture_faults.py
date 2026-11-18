@@ -157,6 +157,20 @@ def test_capture_stops_a_silent_hang():
         assert isinstance(r, SystemExit) and "no-such-program-vd" in str(r.code), r
 
 
+def test_capture_keeps_every_line_and_the_plane_shows_the_latest():
+    # broke: a `git bisect run` printed 33 lines and the record kept the first 24, each cut at 120 characters, with nothing
+    # saying so: git's verdict, the line the plane was for, was gone; and the plane showed only the first 8 lines it had
+    py = sys.executable
+    verdict = "abc1234 is the first bad commit: " + "x" * 120
+    script = f"print('\\n'.join(f'Bisecting: {{i}} revisions left' for i in range(39))); print({verdict!r})"
+    with tempfile.TemporaryDirectory() as tmp:
+        rec = puppet.capture_command([py, "-c", script], Path(tmp), timeout=20)
+        assert len(rec["lines"]) == 40 and rec["lines"][-1]["text"] == verdict, (len(rec["lines"]), rec["lines"][-1:])
+        _, plane = puppet.write_puppet_files(Path(tmp), puppet.analyze_codebase(Path(tmp)), rec)
+        src = plane.read_text(encoding="utf-8")
+        assert "lines.slice(-8)" in src and "lines.slice(0, 8)" not in src, "the plane scrolls like a terminal: the latest lines show"
+
+
 def test_bridge_times_events_by_the_films_named_cues():
     stet_mp4 = ROOT / "docs" / "media" / "stet.mp4"
     with tempfile.TemporaryDirectory() as tmp:
@@ -172,6 +186,23 @@ def test_bridge_times_events_by_the_films_named_cues():
         got = {e.get("role") for e in doc["events"]}
         assert set(named) <= got, f"named events lost: {sorted(set(named) - got)}"
         assert "END" in named, "the last act's END cue should be inside the film"
+
+
+def test_bridge_says_its_hash_is_the_picture_streams_and_gives_the_files():
+    # broke: cues.json's picture.sha256 (ffmpeg's hash of the video stream, which legible-film binds by) sat beside the
+    # file's path with nothing saying so, and `sha256sum` of the file gave another number
+    import hashlib
+    with tempfile.TemporaryDirectory() as tmp:
+        film = Path(tmp) / "film"
+        quiet(lean.main, ["new", str(film), "--kind", "launch"])
+        v = Path(tmp) / "c.mp4"
+        clip(v, 18)
+        out = Path(tmp) / "out"
+        assert quiet(lean.main, ["bridge", "--film", str(film), "--video", str(v), "-o", str(out)]) == 0
+        pic = json.loads((out / "cues.json").read_text(encoding="utf-8"))["picture"]
+        whole = hashlib.sha256(v.read_bytes()).hexdigest()
+        assert pic["sha256"] == bridge.picture_identity_and_schedule(v)["sha256"] != whole, "the binding stays the stream's"
+        assert "stream" in pic.get("sha256_of", "") and pic.get("file_sha256") == whole, pic
 
 
 def test_bridge_refuses_non_square_pixels():

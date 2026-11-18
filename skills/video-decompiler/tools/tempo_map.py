@@ -119,7 +119,19 @@ def grid_score(times, weights, duration, bpm, width=0.010):
     return math.sqrt(max(0.0, recall * coverage)), phase
 
 
+LOWEST, HIGHEST = 60.0, 200.0   # the tempos the fit reads, in BPM
+
+
 def fit(times, weights, duration, prior=None, bounds=None):
+    if prior is not None and prior <= 0:
+        # read as "no tempo given" (0 is false), so --bpm 0 passed the range check (a review's finding)
+        raise ValueError(f"a tempo of {prior:g} BPM is no tempo; give the beat as you hear it, {LOWEST:g} to {HIGHEST:g} BPM")
+    if prior is not None and not LOWEST <= prior <= HIGHEST:
+        # its search band (the prior +-3%) lay wholly outside the range, so nothing was searched and the fit crashed
+        other = prior / 2 if prior > HIGHEST else prior * 2
+        hint = (f"; give the same beat counted at {'half' if prior > HIGHEST else 'double'} speed, {other:g} BPM"
+                if LOWEST <= other <= HIGHEST else "; give the beat as you count it within that range")   # 20 -> 40 is out too
+        raise ValueError(f"a tempo of {prior:g} BPM is outside the {LOWEST:g} to {HIGHEST:g} BPM this reads{hint}")
     if len(times) < 6:
         raise ValueError("fewer than six strong attacks: no measurable beat grid")
     if bounds:
@@ -177,6 +189,51 @@ def fit(times, weights, duration, prior=None, bounds=None):
     return period, phase, score
 
 
+STRETCH = 16    # beats in a stretch whose offset from the grid and tempo are reported
+REACH = 0.2     # of a beat: how far from a grid beat its attack is looked for
+
+
+def beat_drift(times, weights, offset, period, duration, start=0.0):
+    """How far the music's own beats slide from one steady grid (offset, period). For each grid beat, the strongest attack
+    within REACH of a beat of it and its signed offset; for each stretch of STRETCH beats (a short last one joins the one
+    before), the median of those offsets and the stretch's own tempo, fitted to it alone within 15% of the whole. The
+    drift is how far the stretches' median offsets range, in ms. Read on music made to an exact grid (the four worked
+    films' tracks) it is 0 to 14 ms; on clicks speeding up from 116 to 120 BPM, 43; from 112 to 124, 61.
+    What it cannot do: follow a beat. Attacks further than REACH from the grid are not seen, so for a track that drifts
+    further the drift is a floor. A 1906 band record a listener heard speed up 10% reads 34 ms over its first 28 s and
+    69 ms over all 118 s; no reading here confirms or rules out that 10%. A stretch's own tempo is a reading, not a
+    finding: on music made to an exact 120 BPM one stretch read 126. Returns (stretches, drift_ms), drift_ms None with
+    fewer than 8 beats seen."""
+    k, r = [], []
+    for g in np.arange(offset, duration, period):
+        near = np.flatnonzero(np.abs(times - g) <= REACH * period)
+        if near.size:
+            j = near[np.argmax(weights[near])]
+            k.append(g)
+            r.append(times[j] - g)
+    k, r = np.asarray(k), np.asarray(r)
+    if len(k) < 8:
+        return [], None
+    stretches = []
+    edges = list(np.arange(offset, duration, STRETCH * period)) + [duration]
+    if len(edges) > 2 and edges[-1] - edges[-2] < 0.75 * STRETCH * period:
+        del edges[-2]   # a short last stretch reads a few beats (an ending, a held note) as a slide: it joins the one before
+    for a, b in zip(edges[:-1], edges[1:]):
+        m = (k >= a) & (k < b)
+        if m.sum() >= STRETCH // 2:
+            here = (times >= a) & (times < b)
+            try:
+                own = round(60.0 / fit(times[here] - a, weights[here], b - a, None, (60.0 / period * 0.85, 60.0 / period * 1.15))[0], 2)
+            except ValueError:   # too few attacks in it to fit
+                own = None
+            stretches.append({"from_s": round(start + float(a), 3), "to_s": round(start + float(b), 3), "bpm": own,
+                              "off_ms": round(1000 * float(np.median(r[m])), 1)})
+    # a smooth trend through every offset was tried and dropped: on Onoma's music its range moved from 10 to 58 ms when
+    # the grid's origin moved 10 ms, and once the beat slides past REACH off-beat notes flatten it (8 ms for 112 to 124)
+    offs = [x["off_ms"] for x in stretches]
+    return stretches, round(max(offs) - min(offs), 1) if len(offs) > 1 else 0.0
+
+
 def analyse(x, start=0.0, bpm=None, beats_per_bar=4, drop_at_beat=None, tolerance_ms=15.0):
     duration = len(x) / RATE
     times, weights, kicks, _env = attacks(x)
@@ -184,7 +241,7 @@ def analyse(x, start=0.0, bpm=None, beats_per_bar=4, drop_at_beat=None, toleranc
         result = {
             "bpm": None, "period_s": None, "offset_s": None, "downbeats": [], "bar_s": None,
             "drops": [], "grid_strength": 0, "residual_ms": {"median": None, "p90": None, "missing_beats": None},
-            "drift_ms": None, "alternatives": [], "duration_s": duration, "start_s": start,
+            "drift_ms": None, "stretches": [], "alternatives": [], "duration_s": duration, "start_s": start,
             "film_beats_available": 0, "flags": ["fewer than six strong attacks: no measurable grid"],
             "limit": "Timing only; too little attack evidence to estimate tempo. Unheard.",
         }
@@ -219,15 +276,9 @@ def analyse(x, start=0.0, bpm=None, beats_per_bar=4, drop_at_beat=None, toleranc
             residuals.append(float(near.min()) * 1000.0)
         else:
             missing += 1
-    halves = []
-    for a, b in ((0.0, duration / 2.0), (duration / 2.0, duration)):
-        mask = (times >= a) & (times < b)
-        try:
-            p, _, _ = fit(times[mask] - a, weights[mask], b - a, 60.0 / period, (60.0 / period * 0.985, 60.0 / period * 1.015))
-            halves.append(p)
-        except ValueError:
-            halves.append(None)
-    drift = ((halves[1] - halves[0]) / period * duration * 1000.0 if all(p is not None for p in halves) else None)
+    # drift: each half was fitted within 1.5% of the whole, so a band speeding up 10% read as steady; the beats' offsets
+    # from one grid, stretch by stretch, show it
+    stretches, drift = beat_drift(times, weights, offset, period, duration, start)
     bar = period * beats_per_bar
     drops = []
     for t in down:
@@ -259,7 +310,7 @@ def analyse(x, start=0.0, bpm=None, beats_per_bar=4, drop_at_beat=None, toleranc
         "downbeats": [round(start + float(t), 6) for t in down[:16]], "bar_s": bar,
         "drops": drops, "grid_strength": round(strength, 4),
         "residual_ms": {"median": median, "p90": p90, "missing_beats": missing},
-        "drift_ms": drift, "half_periods_s": halves, "alternatives": alternatives,
+        "drift_ms": drift, "stretches": stretches, "alternatives": alternatives,
         "duration_s": duration, "start_s": start,
         "film_beats_available": max(0, int((duration - offset) / period)),
         "kick_slot_scores": kick_scores, "flags": reasons,
@@ -306,6 +357,8 @@ def analyse_file(music_path, bpm=None, start=0.0, window=None, beats_per_bar=4, 
 
 
 MAX_STRETCH = 0.03   # the most a track is sped up or slowed to sit on a whole number of frames a beat (60 fps: 1.8% at worst near 128 BPM)
+DRIFT_MAX_MS = 40    # the most a track's beat may slide from one steady grid: past a frame at 25 fps, and near the 45 ms by which
+                     # sound ahead of picture starts to be noticed (ITU-R BT.1359). Music made to a grid reads 0 to 14 ms.
 
 
 def compile_into_film(film_dir: Path, music_path: Path, bpm=None, drop_at_beat=None, replace=False):
@@ -347,9 +400,17 @@ def compile_into_film(film_dir: Path, music_path: Path, bpm=None, drop_at_beat=N
     if abs(stretch - 1.0) > MAX_STRETCH:
         raise ValueError(f"{music_path.name}: {det_bpm:.2f} BPM is {abs(stretch - 1) * 100:.1f}% from the nearest beat a {fps} fps film can hold "
                          f"({film_bpm:.2f} BPM at {fb} frames); more than {MAX_STRETCH * 100:g}% would change how it sounds. The film's clock is unchanged")
-    # No drift refusal: the measures here cannot tell a drifting track from ordinary music. The accepted films' own music,
-    # made on an exact grid, measured 120 ms of drift (Onoma) and beats 19 ms off the grid at the median (Stet), as far
-    # as a track drifting from 110 to 130 BPM. How far its beats sit from the grid is said, to be listened to.
+    # A film's grid is one steady tempo. The old drift measure (each half fitted within 1.5% of the whole) could not tell
+    # a drifting track from the accepted films' own music (Onoma's read 120 ms), so nothing was ever refused. beat_drift
+    # reads those films' tracks at 0 to 14 ms and clicks speeding up 3% at 43 (its limits are in its own note).
+    drift = res.get("drift_ms")
+    if drift is not None and drift > DRIFT_MAX_MS:
+        where = "; ".join(f"{x['from_s']:g}-{x['to_s']:g} s at {x['bpm']:g} BPM, {x['off_ms']:+g} ms" for x in res.get("stretches") or [])
+        raise ValueError(f"{music_path.name}: its beat slides {drift:.0f} ms against one steady {det_bpm:.2f} BPM grid over the track "
+                         f"(stretch by stretch, tempo and offset from the grid: {where}). A film's grid holds one steady tempo, and a beat "
+                         f"more than {DRIFT_MAX_MS:g} ms off it puts the picture's hits audibly off the music's; this does not follow a "
+                         "changing tempo. Use a track made to a steady beat, or cut a stretch whose beat holds and map that. "
+                         "The film's clock is unchanged")
     if drop_at_beat is not None and not res.get("drops"):
         raise ValueError(f"{music_path.name}: --drop-at-beat {drop_at_beat} asks for its drop, and no drop was measured in it; "
                          "place it by its first beat (leave --drop-at-beat out). The film's clock is unchanged")
@@ -384,7 +445,8 @@ def compile_into_film(film_dir: Path, music_path: Path, bpm=None, drop_at_beat=N
                   "first_beat_s": round(first + shift, 4)}   # where the track's first beat falls in the film (the file can start before it)
     (film_dir / "score.json").write_text(json.dumps(s, indent=1) + "\n", encoding="utf-8")
     s["music"]["off_grid_ms"] = {"median": round(float((res.get("residual_ms") or {}).get("median") or 0.0), 1),
-                                 "p90": round(float((res.get("residual_ms") or {}).get("p90") or 0.0), 1)}
+                                 "p90": round(float((res.get("residual_ms") or {}).get("p90") or 0.0), 1),
+                                 "drift": drift}
     (film_dir / "score.json").write_text(json.dumps(s, indent=1) + "\n", encoding="utf-8")
     return res, film_dir / "score.json"
 
@@ -401,19 +463,25 @@ def main(argv=None):
     ap.add_argument("--json", dest="json_out")
     ap.add_argument("--into-film", dest="film_dir", help="also compile beat grid into FILM/kit/times.gen.ts and score.json")
     a = ap.parse_args(argv)
-    if a.film_dir:
-        res, gen_path = compile_into_film(Path(a.film_dir), Path(a.music), bpm=a.bpm, drop_at_beat=a.drop_at_beat)
-        if a.json_out:
-            Path(a.json_out).write_text(json.dumps(res, indent=1) + "\n", encoding="utf-8")
-        print(f"compiled tempo map ({res['bpm']:.2f} BPM, downbeat {res['offset_s']:.3f} s) -> {gen_path}")
-        return 0
-    res, code = analyse_file(
-        a.music, bpm=a.bpm, start=a.start, window=a.window, beats_per_bar=a.beats_per_bar,
-        drop_at_beat=a.drop_at_beat, tolerance_ms=a.tolerance_ms, json_out=a.json_out,
-    )
+    try:
+        if a.film_dir:
+            res, gen_path = compile_into_film(Path(a.film_dir), Path(a.music), bpm=a.bpm, drop_at_beat=a.drop_at_beat)
+            if a.json_out:
+                Path(a.json_out).write_text(json.dumps(res, indent=1) + "\n", encoding="utf-8")
+            print(f"compiled tempo map ({res['bpm']:.2f} BPM, downbeat {res['offset_s']:.3f} s) -> {gen_path}")
+            return 0
+        res, code = analyse_file(
+            a.music, bpm=a.bpm, start=a.start, window=a.window, beats_per_bar=a.beats_per_bar,
+            drop_at_beat=a.drop_at_beat, tolerance_ms=a.tolerance_ms, json_out=a.json_out,
+        )
+    except ValueError as e:
+        raise SystemExit(f"tempo_map: {e}")
     tempo = f"{res['bpm']:.3f}" if res["bpm"] is not None else "unknown"
     phase = f"{res['offset_s']:.4f}" if res["offset_s"] is not None else "unknown"
-    print(f"{Path(a.music).name}: {tempo} BPM, downbeat {phase} s; strength {res['grid_strength']}; residual {res['residual_ms']}; drift {res['drift_ms']} ms")
+    print(f"{Path(a.music).name}: {tempo} BPM, downbeat {phase} s; strength {res['grid_strength']}; residual {res['residual_ms']}; "
+          f"drift {res['drift_ms']} ms against one steady grid (more than {DRIFT_MAX_MS:g} ms and --into-film refuses it)")
+    if res.get("stretches"):
+        print("  stretch by stretch: " + "; ".join(f"{x['from_s']:g}-{x['to_s']:g} s {x['bpm']:g} BPM, {x['off_ms']:+g} ms" for x in res["stretches"]))
     return code
 
 

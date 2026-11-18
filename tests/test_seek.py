@@ -160,9 +160,54 @@ def peak_mb(cmd):
     return p.returncode, out + err, peak / 2 ** 20
 
 
+def test_a_reader_closed_early_lets_go_of_the_film_through_a_launcher(tmp):
+    # broke on the hosted Windows runners (2 runs in 5): their ffmpeg is Chocolatey's launcher, which starts the real
+    # one. Closing film_diff.stream after one frame killed the launcher at once and left the real ffmpeg holding the
+    # film, so the test's folder could not be removed (a council's finding). space.frames did the same; decode.pictures
+    # already waited for ffmpeg. Here `ffmpeg` is run through a launcher of that kind, and the film must be deletable the moment each reader
+    # is closed.
+    import subprocess as sp
+    import time
+    from unittest.mock import patch
+    import decode
+    import space
+    launcher = tmp / "launcher.py"
+    launcher.write_text("import subprocess, sys\nsys.exit(subprocess.call(sys.argv[1:]))\n", encoding="utf-8")
+    real = sp.Popen
+
+    def through_launcher(cmd, *a, **k):
+        if isinstance(cmd, (list, tuple)) and cmd and Path(str(cmd[0])).stem.lower() == "ffmpeg":
+            cmd = [sys.executable, str(launcher), *map(str, cmd)]
+        return real(cmd, *a, **k)
+    readers = {
+        "film_diff.stream": lambda v: film_diff.stream(str(v), 0.0, 1.0, 30.0),
+        "decode.pictures": lambda v: decode.pictures(["ffmpeg", "-v", "error", "-i", str(v), "-f", "rawvideo", "-pix_fmt", "gray", "-"], W * H, "a test"),
+        "space.frames": lambda v: space.frames(str(v), 30),
+    }
+    held = []
+    for name, open_reader in readers.items():
+        video = numbered(tmp / f"{name}.mp4", 30, n=90)
+        with patch.object(sp, "Popen", through_launcher):
+            frames = open_reader(video)
+            next(frames)
+            frames.close()
+        try:
+            os.unlink(video)
+        except PermissionError:
+            held.append(name)
+            removed_later = time.monotonic() + 10
+            while os.path.exists(video) and time.monotonic() < removed_later:
+                try:
+                    os.unlink(video)
+                except PermissionError:
+                    time.sleep(0.1)
+    assert not held, f"closed after one frame, still holding the film: {held}"
+
+
 def main():
-    for t in (test_zero_rate_is_not_a_crash, test_every_tool_lands_on_frame_f, test_variable_rate, test_a_phone_clip_is_its_shown_shape):
-        with tempfile.TemporaryDirectory() as tmp:
+    for t in (test_zero_rate_is_not_a_crash, test_every_tool_lands_on_frame_f, test_variable_rate, test_a_phone_clip_is_its_shown_shape,
+              test_a_reader_closed_early_lets_go_of_the_film_through_a_launcher):
+        with tempfile.TemporaryDirectory() as tmp:     # a file still held here is a reader that did not let go
             t(Path(tmp))
         print("ok", t.__name__)
     print("seek checks passed")

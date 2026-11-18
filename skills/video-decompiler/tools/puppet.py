@@ -119,8 +119,8 @@ def capture_command(cmd, cwd: Path, timeout: float = 30.0):
             break
         dt, raw = item
         clean = strip_ansi(raw.rstrip("\r\n"))
-        if clean.strip():
-            lines.append({"t": dt, "text": clean[:120]})
+        if clean.strip():   # whole: the plane clips a long line itself, and a cut at 120 characters lost git's verdict's end
+            lines.append({"t": dt, "text": clean})
     try:  # the output can close before the command ends: the same deadline holds until it exits
         p.wait(timeout=max(0.0, deadline - time.monotonic()))
     except subprocess.TimeoutExpired:
@@ -133,7 +133,7 @@ def capture_command(cmd, cwd: Path, timeout: float = 30.0):
         "exit_code": p.returncode,
         "timed_out": timed_out,
         "duration_s": round(time.monotonic() - t0, 4),
-        "lines": lines[:24],
+        "lines": lines,   # every line: the first 24 were kept, silently, and a bisect's verdict (line 33) was lost
     }
 
 
@@ -288,7 +288,8 @@ export function PuppetTerminal({
       <div style={{ fontSize: 36, lineHeight: "52px", color: "#58a6ff", marginBottom: 20 }}>
         {said.slice(0, cmdChars)}
       </div>
-      {lines.slice(0, 8).map((row, i) => (
+      {/* the latest eight lines to have appeared, as a terminal scrolls: the first eight never showed a command's verdict */}
+      {lines.slice(-8).map((row, i) => (
         <div key={i} style={{ fontSize: 32, lineHeight: "46px", color: "#d2dce6", whiteSpace: "pre" }}>
           {row.text}
         </div>

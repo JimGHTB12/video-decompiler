@@ -65,10 +65,14 @@ def frames(path, fps=FPS):
                 break
             yield np.frombuffer(raw, np.uint8).reshape(HIGH, wide)
     finally:
+        # ffmpeg stops on the closed pipe and is waited for, killed only if it doesn't: killed at once, a launcher
+        # (Chocolatey's ffmpeg) died and left the real ffmpeg holding the film (a council's finding; film_diff.stop_decoder)
         p.stdout.close()
-        if p.poll() is None:
+        try:
+            p.wait(timeout=5)
+        except subprocess.TimeoutExpired:
             p.kill()
-        p.wait()
+            p.wait()
 
 
 def follow(a, b, corners=400, levels=3, least=0):

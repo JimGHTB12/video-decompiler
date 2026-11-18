@@ -150,6 +150,32 @@ def where_the_light_is():
         assert "all four corners are darker in 100% of its frames" in out, out
 
 
+def keyframes_are_not_events():
+    """broke: il's copy has a keyframe every 3.000 s, and over a still picture each keyframe's one-frame change (0.39 to
+    0.76, the compression resetting) was counted as a move and an event, at 6, 12, 30, 48, 51, 54 and 57 s. Planted: a
+    still textured picture, lossless, a keyframe every second, its brightness stepping one level at each keyframe as a
+    low-bitrate copy's does; and one real change of the same size between keyframes, which stays an event."""
+    import numpy as np
+    base = np.random.default_rng(3).integers(60, 190, (360, 640)).astype(np.int16)
+    frames = []
+    for i in range(150):                                   # 5 s at 30 fps; keyframes at 0, 1, 2, 3 and 4 s
+        f = base + (i // 30) % 2                           # up a level at one keyframe, down at the next
+        if i >= 75:
+            f = f.copy()
+            f[150:210, 290:350] += 64                      # a real change at 2.5 s, about as big over the whole frame
+        frames.append(f.astype(np.uint8))
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "gray", "-s", "640x360", "-r", "30", "-i", "-",
+                        "-c:v", "libx264", "-qp", "0", "-g", "30", "-keyint_min", "30", "-sc_threshold", "0", "-pix_fmt", "yuv420p",
+                        str(d / "keys.mp4")], input=np.stack(frames).tobytes(), check=True)
+        run(d / "keys.mp4", "--out", d / "keys")
+        m = json.loads((d / "keys" / "measure.json").read_text(encoding="utf-8"))
+        near = lambda t: any(abs(e - t) <= 1 / 30 + 1e-6 for e in m["events"])
+        assert not any(near(t) for t in (1.0, 2.0, 3.0, 4.0)), f"a keyframe's compression step is no event: {m['events']}"
+        assert near(2.5), f"a real change of the same size between keyframes still is: {m['events']}"
+
+
 def measure_version():
     sys.path.insert(0, str(TOOLS))
     import measure
@@ -336,6 +362,7 @@ if __name__ == "__main__":
     a_short_window_or_broken_sound_is_not_measured()
     a_cut_short_file_is_not_measured()
     beat_rows()
+    keyframes_are_not_events()
     one_to_one()
     palette_and_memory()
     small_things()
