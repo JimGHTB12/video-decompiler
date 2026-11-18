@@ -731,9 +731,10 @@ def test_a_failed_export_never_removes_a_cut_already_filed():
             (o / "cuts" / name).write_bytes(b"cut")
         gone = sorted(f.name.lower() for f, _, _ in lean.clean_plan(o, keep_cuts=1))
         assert gone == (["draft-cut1.mp4", "draft-cut2.mp4"] if lean.case_of(o / "cuts") else ["draft-cut2.mp4"]), gone
-        # on Windows Draft-cut1.mp4 is draft-cut1.mp4: draft's next cut is 2 everywhere (a council's finding), and a
+        # on Windows Draft-cut1.mp4 is draft-cut1.mp4, so draft's next cut is 2 there (a council's finding); where names
+        # keep their case (Linux, a case-sensitive Mac volume) Draft is another film and draft's next cut is 1. And a
         # number whose share copy is already there is passed over
-        assert lean.cut_of(out, "draft")[0] == 2 and lean.cut_of(out, "solo")[0] == 1
+        assert lean.cut_of(out, "draft")[0] == (2 if lean.case_of(out / "cuts") else 1) and lean.cut_of(out, "solo")[0] == 1
         (out / "cuts" / "solo-cut1-share.mp4").write_bytes(b"filed")
         assert lean.cut_of(out, "solo")[0] == 3
         assert [f.name for f in lean.sheets_of(out / "cuts" / "draft[1]-cut1.mp4")] == ["draft[1]-cut1-sheet.jpg"]
