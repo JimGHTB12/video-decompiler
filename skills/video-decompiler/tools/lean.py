@@ -464,8 +464,7 @@ def sheets_of(film):
     """FILM's timed sheets beside it, NAME-sheet.jpg or NAME-sheet_NNN.jpg, matched as text: a glob built from the name
     took another film's sheets when the name held [ or ? (draft[1] matched draft1), a review's finding."""
     film = Path(film)
-    own = re.compile(re.escape(film.stem) + r"-sheet(_\d+)?\.jpg", case_of(film.parent))
-    return sorted(f for f in film.parent.iterdir() if own.fullmatch(f.name)) if film.parent.is_dir() else []
+    return sorted(_named(film.parent, film.stem, r"-sheet(_\d+)?\.jpg"))
 
 
 def raea_render(d, entry, out, *flags, env=None):
@@ -1409,32 +1408,41 @@ def export_frames(s, entry, comp):
 
 
 CUT = re.compile(r"(.+)-cut(\d+)\.mp4")
-def case_of(folder):
-    """re.IGNORECASE where FOLDER's filesystem treats names that differ only in case as one file, else 0: there a
-    re-export as Draft must find draft's sheets (a council's finding), and elsewhere they are two films' files. Asked
-    of the folder itself (a Mac volume can be case-sensitive, and deleting by a case-blind match there took another
-    film's only cut: a council's finding): its own name with the case swapped names the same folder or not."""
+def _named(folder, prefix, rest):
+    """The files in FOLDER named PREFIX followed by something matching the pattern REST, as the filesystem itself
+    names them. A pattern without case only proposes: a file counts when its name starts with PREFIX exactly, or when
+    PREFIX spelled exactly, with the file's own ending, opens that very file. So on Windows draft's sheets are Draft's,
+    on Linux and a case-sensitive Mac volume they are not, and STRASSE is never taken for Straße. Deciding sameness
+    here took the platform's word, then Python's casefold: one deleted another film's only cut on a case-sensitive Mac
+    volume, the other merged STRASSE and Straße, which Windows keeps apart (council findings)."""
     folder = Path(folder)
-    for q in (folder, *folder.parents):
-        if q.name and q.name.swapcase() != q.name:
-            other = q.with_name(q.name.swapcase())
-            try:
-                return re.IGNORECASE if other.exists() and os.path.samefile(other, q) else 0
-            except OSError:
-                return 0
-    return 0          # no letter to ask with: match exactly, which never takes another film's files
+    if not folder.is_dir():
+        return []
+    proposed = re.compile(re.escape(prefix) + rest, re.IGNORECASE)
+    found = []
+    for f in folder.iterdir():
+        if not proposed.fullmatch(f.name):
+            continue
+        if f.name.startswith(prefix):
+            found.append(f)
+            continue
+        spelled = folder / (prefix + f.name[len(prefix):])
+        try:
+            if spelled.exists() and os.path.samefile(spelled, f):
+                found.append(f)
+        except OSError:
+            pass                       # cannot tell: not ours, so it is kept
+    return found
 
 
 def cut_of(out, stem):
     """(N, path) of the next cut of `stem`: OUT/cuts/STEM-cutN.mp4, N one past the highest there, names matched as text.
     A glob built from the name missed draft[1]'s cuts (the [1] read as a set of characters), so cut 1 was given again,
-    and the failed export's rollback deleted the cut already filed under it (a review's finding). Names are compared
-    without case, and a number whose names are taken is passed over: on Windows Draft-cut1.mp4 is draft-cut1.mp4, so
-    draft's cut 1 was written over it (a council's finding)."""
+    and the failed export's rollback deleted the cut already filed under it (a review's finding). A number whose names
+    the filesystem says are taken is passed over: on Windows draft-cut1.mp4 is Draft-cut1.mp4, and draft's cut 1 was
+    written over it (a council's finding). Whether two names are one is the filesystem's answer, never computed here."""
     cuts = out / "cuts"
-    fold = (lambda x: x.casefold()) if cuts.is_dir() and case_of(cuts) else (lambda x: x)   # one rule with clean_plan's
-    have = [int(m.group(2)) for f in (cuts.iterdir() if cuts.is_dir() else ())
-            if (m := CUT.fullmatch(f.name)) and fold(m.group(1)) == fold(stem)]
+    have = [int(m.group(2)) for f in (cuts.iterdir() if cuts.is_dir() else ()) if (m := CUT.fullmatch(f.name)) and m.group(1) == stem]
     n = max(have, default=0) + 1
     while (cuts / f"{stem}-cut{n}.mp4").exists() or (cuts / f"{stem}-cut{n}-share.mp4").exists():
         n += 1
@@ -2066,8 +2074,8 @@ def _cut_files(o, stem, n):
     copy, its sheets, a part left by a stopped export). A glob built from the name took a sibling film's cut when the
     name held [ or ? (film[1] matched film1); and any NAME-cutN-* took film-cut1-alt's only cut as film's cut 1's (both
     a review's findings)."""
-    own = re.compile(re.escape(f"{stem}-cut{n}") + r"(\.mp4|\.part\.mp4|-share\.mp4|-sheet(_\d+)?\.jpg)", case_of(o / "cuts"))
-    return [f for f in (o / "cuts").iterdir() if f.is_file() and not _linked(f) and own.fullmatch(f.name)]
+    return [f for f in _named(o / "cuts", f"{stem}-cut{n}", r"(\.mp4|\.part\.mp4|-share\.mp4|-sheet(_\d+)?\.jpg)")
+            if f.is_file() and not _linked(f)]
 
 
 def clean_plan(o, keep_cuts=None, keep=()):
@@ -2077,13 +2085,13 @@ def clean_plan(o, keep_cuts=None, keep=()):
     plan = [(f, f.stat().st_size, "made again when needed") for f in _rebuilt(o)]
     if keep_cuts is not None and (o / "cuts").is_dir() and not _linked(o / "cuts"):
         cuts = {}
-        # where names differ only in case are one file, Draft's and draft's cuts are one film's, numbered together by
-        # cut_of: grouped apart, draft's newer cut 2 went while Draft's older cut 1 stayed (a council's finding)
-        fold = (lambda x: x.casefold()) if case_of(o / "cuts") else (lambda x: x)
+        # grouped by the name exactly as written: grouping without case merged STRASSE and Straße, which Windows keeps
+        # apart, and removed one film's only cut (a council's finding). Where Draft and draft are one film this keeps
+        # more than asked (Draft's cut 1 beside draft's newest), never less
         for f in (o / "cuts").iterdir():
             m = CUT.fullmatch(f.name)
             if m and f.is_file() and not _linked(f):
-                cuts.setdefault(fold(m.group(1)), set()).add(int(m.group(2)))
+                cuts.setdefault(m.group(1), set()).add(int(m.group(2)))
         for stem, ns in sorted(cuts.items()):   # each film name keeps its own N newest (export -o gives a folder several)
             for n in sorted(ns)[:-keep_cuts]:
                 if n in keep:   # a cut the person named with --keep, accepted or pinned, stays whatever its number
@@ -2129,8 +2137,11 @@ def cmd_clean(a):
         raise SystemExit("vd clean: --keep goes with --keep-cuts (plain clean never removes a cut)")
     # every folder the path passes through, as written: a relative VD_OUT stopped the walk up at ".", and abspath
     # folded link/.. away before it was looked at, while the walk itself went through the link (council findings)
+    # and as Windows resolves it: a drive-relative VD_OUT (C:rel, the current folder on another drive) joined to the
+    # current folder stayed C:rel and missed the junction under C:'s own current folder (a council's finding)
     given = OUTROOT if OUTROOT.is_absolute() else Path(os.getcwd()) / OUTROOT
-    linked = next((q for q in (Path(*given.parts[:i]) for i in range(1, len(given.parts) + 1)) if _linked(q)), None)
+    walks = (given, Path(os.path.abspath(OUTROOT)))
+    linked = next((q for w in walks for q in (Path(*w.parts[:i]) for i in range(1, len(w.parts) + 1)) if _linked(q)), None)
     if linked is not None:
         # every file under a linked VD_OUT is reached through the link (a review's finding: a junction VD_OUT was listed)
         raise SystemExit(f"vd clean: {linked} is a link (to {linked.resolve()}), and clean never works through a link, so nothing was looked at. "

@@ -600,6 +600,18 @@ def test_clean_never_reaches_outside_its_folder():
         # link/.. in VD_OUT: the path as written passes through the link, though abspath folds it away (a council's finding)
         lean.OUTROOT = root / "linked-out" / ".." / "outside"
         assert _refused("--yes") and _refused(), "a VD_OUT that passes through a link is refused"
+        if os.name == "nt":
+            # a drive-relative VD_OUT (C:rel) while the current folder is on another drive: joined to that folder it
+            # stays C:rel, and only Windows's own resolution (the drive's current folder, here inside the junction)
+            # shows the link (a council's finding)
+            from unittest.mock import patch
+            os.chdir(root / "linked-out" / "inner")
+            try:
+                lean.OUTROOT = Path(Path(os.getcwd()).drive + "rel")
+                with patch("os.getcwd", lambda: r"Z:\elsewhere"):
+                    assert _refused("--yes") and _refused(), "a drive-relative VD_OUT under a link is refused"
+            finally:
+                os.chdir(here)
     finally:
         lean.OUTROOT = keep
 
@@ -723,32 +735,46 @@ def test_a_failed_export_never_removes_a_cut_already_filed():
                      "solo-cut2-share.mp4"):
             (out / "cuts" / name).write_bytes(b"filed")
         assert lean.cut_of(out, "draft[1]")[0] == 2 and lean.cut_of(out, "draft1")[0] == 5
-        # where Draft and draft are one file, they are one film: grouped and dropped together, oldest first (a council's
-        # finding: grouped apart, draft's newer cut 2 went while Draft's older cut 1 stayed)
+        # does this filesystem keep names that differ only in case apart? found by writing one and looking for the other
+        probe = out / "CaseProbe.txt"
+        probe.write_bytes(b"x")
+        blind = (out / "caseprobe.txt").exists()
+        probe.unlink()
+        # clean groups cuts by the name as written: never two films as one (STRASSE and Straße are two on Windows, and
+        # grouping without case removed one's only cut: a council's finding); Draft and draft keep more than asked
         o = out / "f"
         (o / "cuts").mkdir(parents=True)
-        for name in ("Draft-cut1.mp4", "draft-cut2.mp4", "draft-cut3.mp4"):
+        for name in ("Draft-cut1.mp4", "draft-cut2.mp4", "draft-cut3.mp4", "STRASSE-cut1.mp4", "Straße-cut2.mp4"):
             (o / "cuts" / name).write_bytes(b"cut")
-        gone = sorted(f.name.lower() for f, _, _ in lean.clean_plan(o, keep_cuts=1))
-        assert gone == (["draft-cut1.mp4", "draft-cut2.mp4"] if lean.case_of(o / "cuts") else ["draft-cut2.mp4"]), gone
+        gone = sorted(f.name for f, _, _ in lean.clean_plan(o, keep_cuts=1))
+        assert gone == ["draft-cut2.mp4"], gone
         # on Windows Draft-cut1.mp4 is draft-cut1.mp4, so draft's next cut is 2 there (a council's finding); where names
         # keep their case (Linux, a case-sensitive Mac volume) Draft is another film and draft's next cut is 1. And a
         # number whose share copy is already there is passed over
-        assert lean.cut_of(out, "draft")[0] == (2 if lean.case_of(out / "cuts") else 1) and lean.cut_of(out, "solo")[0] == 1
+        assert lean.cut_of(out, "draft")[0] == (2 if blind else 1) and lean.cut_of(out, "solo")[0] == 1
+        assert lean.cut_of(out, "Straße")[0] == 1, "STRASSE's cuts are not Straße's"
         (out / "cuts" / "solo-cut1-share.mp4").write_bytes(b"filed")
         assert lean.cut_of(out, "solo")[0] == 3
         assert [f.name for f in lean.sheets_of(out / "cuts" / "draft[1]-cut1.mp4")] == ["draft[1]-cut1-sheet.jpg"]
         # where names differ only in case are one file (Windows, macOS), Draft's sheets are draft's: a re-export as Draft
         # left draft's old sheets behind (a council's finding); on Linux they are another film's
         (out / "draft-sheet_000.jpg").write_bytes(b"sheet")
-        # asked of the folder, not the platform (a Mac volume can be case-sensitive): here, the answer this
-        # filesystem gives, found independently by writing one name and looking for the other
-        probe = out / "CaseProbe.txt"
-        probe.write_bytes(b"x")
-        blind = (out / "caseprobe.txt").exists()
-        probe.unlink()
-        assert bool(lean.case_of(out)) == blind, (lean.case_of(out), blind)
         assert [f.name for f in lean.sheets_of(out / "Draft.mp4")] == (["draft-sheet_000.jpg"] if blind else []), blind
+        # in a folder whose own name swaps case badly (Straße -> sTRASSE), the filesystem is still asked file by file
+        # (a council's finding: the folder test said case-sensitive there and draft's sheets were missed)
+        u = out / "Straße"
+        u.mkdir()
+        (u / "draft-sheet_000.jpg").write_bytes(b"sheet")
+        (u / "STRASSE-sheet.jpg").write_bytes(b"another film's sheet")
+        assert [f.name for f in lean.sheets_of(u / "Draft.mp4")] == (["draft-sheet_000.jpg"] if blind else []), blind
+        assert [f.name for f in lean.sheets_of(u / "Straße.mp4")] == [], "STRASSE's sheet is not Straße's"
+        # a name Python's case-blind matching takes for another but the filesystem may keep apart: the Kelvin sign K
+        # matches k in a pattern without case, while Windows names Kiln and kiln as two files. The filesystem's
+        # own answer decides (macOS, which folds the sign to K, may say they are one)
+        (out / "kiln-sheet.jpg").write_bytes(b"kiln's sheet")
+        kelvin = out / "Kiln-sheet.jpg"
+        one = kelvin.exists() and __import__("os").path.samefile(kelvin, out / "kiln-sheet.jpg")
+        assert [f.name for f in lean.sheets_of(out / "Kiln.mp4")] == (["kiln-sheet.jpg"] if one else []), one
         # whatever the numbering says, what was there under the cut's names before the export stays when it fails
         dest = out / "draft[1].mp4"
 
