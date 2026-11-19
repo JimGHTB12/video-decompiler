@@ -1,33 +1,37 @@
 name: tests
 
 # Every tool is tested against a fault with a known answer (tests/run.py). The tests need no graphics card and no raea:
-# the ones that render say "skipped". One more job renders, twice: it installs raea on a Mac with raea's own installer,
-# sets up by the README's own lines, runs the first-run check, every test with nothing skipped, and then makes a short
-# film whole. Once with the raea release the worked films were checked on, which must pass; and once with whatever
-# the installer gives a stranger that day, pre-releases included (three came out on the day this was published), which
-# is watched and does not fail the run: a fault in a pre-release is news, not this repository's failure. raea is left
-# where its installer puts it and nothing is set, which is what the README promises. On a private copy of this
-# repository a push runs the tests on Linux only (the cheapest minutes), and the three systems and the raea job run
-# when started by hand: every job skipped had shown a push as green though nothing had run.
+# the ones that render say "skipped". One more job renders: it installs raea on a Mac with raea's own installer, sets up
+# by the README's own lines, runs the first-run check, every test with nothing skipped, and then makes a short film
+# whole. Every push and pull request runs it with the raea release the worked films were checked on (0.1.2), which must
+# pass; a daily schedule (where `tests` is skipped) and manual runs also watch whatever the installer gives a stranger
+# that day, pre-releases included (three came out on the day this was published), without failing the run: a fault in a
+# pre-release is news, not this repository's failure. raea is left where its installer puts it and nothing is set, which
+# is what the README promises. `tests` runs on Linux and Windows, because `with-raea` (0.1.2) already runs `tests/run.py`
+# on macOS. On a private copy of this repository a push runs the tests on Linux only (the cheapest minutes), and both
+# systems and both raea legs run when started by hand: every job skipped had shown a push as green though nothing had run.
 on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "0 6 * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: tests-${{ github.ref }}
+  group: tests-${{ github.ref }}${{ github.event_name == 'schedule' && '-schedule' || '' }}
   cancel-in-progress: true
 
 jobs:
   tests:
+    if: github.event_name != 'schedule'
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON((github.event_name == 'workflow_dispatch' || !github.event.repository.private) && '["ubuntu-latest", "windows-latest", "macos-latest"]' || '["ubuntu-latest"]') }}
+        os: ${{ fromJSON((github.event_name == 'workflow_dispatch' || !github.event.repository.private) && '["ubuntu-latest", "windows-latest"]' || '["ubuntu-latest"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -41,9 +45,6 @@ jobs:
       - name: ffmpeg (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      - name: ffmpeg (macOS)
-        if: runner.os == 'macOS'
-        run: brew install ffmpeg
       - name: ffmpeg (Windows)
         if: runner.os == 'Windows'
         run: choco install ffmpeg -y --no-progress
@@ -58,7 +59,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        raea: ["0.1.2", ""]
+        raea: ${{ fromJSON(github.event_name == 'schedule' && '[""]' || github.event_name == 'workflow_dispatch' && '["0.1.2", ""]' || '["0.1.2"]') }}
     continue-on-error: ${{ matrix.raea == '' }}
     runs-on: macos-latest
     timeout-minutes: 40

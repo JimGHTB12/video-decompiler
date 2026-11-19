@@ -57,14 +57,16 @@ def attacks(x):
     prev = np.zeros(FRAME // 2 + 1)
     window = np.hanning(FRAME)
     freqs = np.fft.rfftfreq(FRAME, 1 / RATE)
+    lows = (freqs >= 35) & (freqs <= 250)
+    # every frame as a view of the padded signal (an index array of every sample of every frame was built and gathered)
+    framed = np.lib.stride_tricks.sliding_window_view(padded, FRAME)[::HOP]
     for a in range(0, n, 1024):
         b = min(n, a + 1024)
-        starts = np.arange(a, b) * HOP
-        frames = padded[starts[:, None] + np.arange(FRAME)] * window
+        frames = framed[a:b] * window
         mag = np.log1p(20 * np.abs(np.fft.rfft(frames, axis=1)))
         delta = np.maximum(mag - np.vstack((prev, mag[:-1])), 0)
         full[a:b] = np.mean(delta, axis=1)
-        low[a:b] = np.mean(delta[:, (freqs >= 35) & (freqs <= 250)], axis=1)
+        low[a:b] = np.mean(delta[:, lows], axis=1)
         prev = mag[-1]
     full /= max(float(np.percentile(full, 99)), 1e-10)
     low /= max(float(np.percentile(low, 99)), 1e-10)
@@ -102,7 +104,15 @@ def grid_score(times, weights, duration, bpm, width=0.010):
     phases = np.mod(times, period) / period * bins
     hist = np.bincount(np.floor(phases).astype(int) % bins, weights=weights, minlength=bins)
     radius = max(1, int(width * 1000))
-    smoothed = sum(np.roll(hist, k) * math.exp(-0.5 * (k / (radius / 2)) ** 2) for k in range(-radius, radius + 1))
+    if radius <= bins:
+        # each shifted copy is a slice of the histogram wrapped round once (np.roll made a new array per shift), added in
+        # the same order with the same math.exp weights, so the sum is the same to the bit (np.convolve would reorder it)
+        wrapped = np.concatenate((hist[-radius:], hist, hist[:radius]))
+        smoothed = 0
+        for k in range(-radius, radius + 1):
+            smoothed = smoothed + wrapped[radius - k:radius - k + bins] * math.exp(-0.5 * (k / (radius / 2)) ** 2)
+    else:
+        smoothed = sum(np.roll(hist, k) * math.exp(-0.5 * (k / (radius / 2)) ** 2) for k in range(-radius, radius + 1))
     phase = (int(np.argmax(smoothed)) + 0.5) / bins * period
     distance = np.abs((times - phase + period / 2) % period - period / 2)
     near = distance < width * 2
@@ -111,11 +121,8 @@ def grid_score(times, weights, duration, bpm, width=0.010):
     response = np.exp(-0.5 * (distance / width) ** 2)
     recall = float(np.sum(weights * response) / max(weights.sum(), 1e-10))
     indices = np.round((times[near] - phase) / period).astype(int)
-    strongest = {}
-    for i, w in zip(indices, weights[near] * response[near]):
-        strongest[i] = max(strongest.get(i, 0.0), float(w))
     count = max(1, int(duration / period))
-    coverage = min(1.0, len(strongest) / count)
+    coverage = min(1.0, len(np.unique(indices)) / count)   # beats with an attack near them (only their number was read)
     return math.sqrt(max(0.0, recall * coverage)), phase
 
 
@@ -434,19 +441,18 @@ def compile_into_film(film_dir: Path, music_path: Path, bpm=None, drop_at_beat=N
     fitted = next(c for c in (film_dir / "media" / f"{music_path.stem}-fitted{'' if n == 1 else f'-{n}'}.wav" for n in range(1, 1000))
                   if c.resolve() not in used)
     ff = shutil.which("ffmpeg") or "ffmpeg"
-    p = subprocess.run([ff, "-v", "error", "-y", "-i", str(music_path), "-af", f"atempo={stretch:.6f}", "-ar", "48000", "-ac", "2",
-                        "-c:a", "pcm_s16le", str(fitted)], capture_output=True, text=True, encoding="utf-8", errors="replace")
+    p = subprocess.run([ff, "-v", "error", "-nostdin", "-y", "-i", str(music_path), "-af", f"atempo={stretch:.6f}", "-ar", "48000", "-ac", "2",
+                        "-c:a", "pcm_s16le", str(fitted)], capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
     if p.returncode or not fitted.is_file():
         raise ValueError(f"{music_path.name}: ffmpeg could not fit it: {(p.stderr or '')[-300:]}")
     s.pop("tempo_map", None)
     s["music"] = {"file": fitted.relative_to(film_dir).as_posix(), "source": music_path.name, "bpm": round(det_bpm, 3), "fb": fb,
                   "film_bpm": round(film_bpm, 3), "stretch": round(stretch, 6), "at": at, "from": start,
                   "drop_at_beat": drop_at_beat, "gain": 0.0, "replace": bool(replace), "octave": octave_note,
-                  "first_beat_s": round(first + shift, 4)}   # where the track's first beat falls in the film (the file can start before it)
-    (film_dir / "score.json").write_text(json.dumps(s, indent=1) + "\n", encoding="utf-8")
-    s["music"]["off_grid_ms"] = {"median": round(float((res.get("residual_ms") or {}).get("median") or 0.0), 1),
-                                 "p90": round(float((res.get("residual_ms") or {}).get("p90") or 0.0), 1),
-                                 "drift": drift}
+                  "first_beat_s": round(first + shift, 4),   # where the track's first beat falls in the film (the file can start before it)
+                  "off_grid_ms": {"median": round(float((res.get("residual_ms") or {}).get("median") or 0.0), 1),
+                                  "p90": round(float((res.get("residual_ms") or {}).get("p90") or 0.0), 1),
+                                  "drift": drift}}
     (film_dir / "score.json").write_text(json.dumps(s, indent=1) + "\n", encoding="utf-8")
     return res, film_dir / "score.json"
 

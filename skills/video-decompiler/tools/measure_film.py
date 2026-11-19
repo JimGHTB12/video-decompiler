@@ -12,6 +12,7 @@ and see.py (its shot boundaries are the scene changes here, its camera moves and
 computed below, and every threshold is a named constant so the same numbers are applied to every film.
 """
 import argparse
+import functools
 import json
 import os
 import re
@@ -20,9 +21,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
 
 TOOLS = Path(__file__).resolve().parent
 sys.path.insert(0, str(TOOLS))
@@ -31,7 +30,6 @@ def measure_versions(measure, see):
     return {"measure": measure.VERSION, "see": see.VERSION}
 
 
-from measure import audio as vd_audio  # noqa: E402  product onset detector (10 ms hop, flux > mean + 2 sd, level > -50 dB)
 
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
@@ -57,13 +55,10 @@ BREATH = 0.25               # s: a pause between words this long counts as a gap
 
 
 def probe(path):
-    p = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,width,height,r_frame_rate:format=duration",
-                        "-of", "json", str(path)], capture_output=True, text=True, creationflags=NO_WINDOW)
-    j = json.loads(p.stdout)
-    v = next(s for s in j["streams"] if s["codec_type"] == "video")
-    a, b = v["r_frame_rate"].split("/")
-    return {"w": int(v["width"]), "h": int(v["height"]), "fps": float(a) / float(b),
-            "duration": float(j["format"]["duration"]), "audio": any(s["codec_type"] == "audio" for s in j["streams"])}
+    from film_diff import ffprobe, fps_of
+    raw = ffprobe(path)
+    return {"w": raw["w"], "h": raw["h"], "fps": fps_of(raw, "r_frame_rate"),
+            "duration": raw["duration"], "audio": raw["audio"]}
 
 
 def frames(path, w, h):
@@ -75,7 +70,9 @@ def frames(path, w, h):
         yield np.frombuffer(b, np.uint8).reshape(h, w, 3)
 
 
+@functools.lru_cache(maxsize=8)
 def font(size):
+    from PIL import ImageFont
     for f in ("C:/Windows/Fonts/consola.ttf", "C:/Windows/Fonts/arial.ttf"):
         if Path(f).exists():
             return ImageFont.truetype(f, size)
@@ -83,29 +80,45 @@ def font(size):
 
 
 # ---- frame measures ----------------------------------------------------------------------------------------------
+# the families as tables of the 256 stored values, the same whole numbers the arithmetic gave
+HUE_FAMILY = ((np.arange(256) * 2 // 30) % 12).astype(np.uint8)      # 12 hue families of 30 degrees
+GREY_FAMILY = (12 + np.digitize(np.arange(256), [70, 190])).astype(np.uint8)   # 12 dark, 13 grey, 14 light
+
+
 def colour_families(rgb):
+    import cv2
     hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
-    h, s, v = hsv[..., 0].astype(int), hsv[..., 1], hsv[..., 2]
-    lab = np.where(s >= ACHROMA_S, (h * 2 // 30) % 12, 0)            # 12 hue families of 30 degrees
+    h, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+    lab = np.where(s >= ACHROMA_S, HUE_FAMILY[h], 0)
     ach = (s < ACHROMA_S) | (v < 40)
-    lab = np.where(ach, 12 + np.digitize(v, [70, 190]), lab)           # 12 dark, 13 grey, 14 light
+    lab = np.where(ach, GREY_FAMILY[v], lab)
     share = np.bincount(lab.ravel(), minlength=15) / lab.size
     return int((share >= FAMILY_MIN).sum()), float(s.mean() / 255), {str(t): int((share >= t).sum()) for t in (0.015, FAMILY_MIN, 0.06)}
 
 
 def flat_share(rgb):
+    """Shares of FLAT_BLOCK blocks whose largest channel spread is under 1.5, FLAT_STD and 6.0. In whole numbers: for n
+    pixels, std < t exactly when n * sum(x * x) - sum(x) ** 2 < (n * t) ** 2, every term a whole number here. The float32
+    std it replaces was exact wherever it decided (a block near these spreads has small differences, summed exactly),
+    so the shares are the same; test_measure_film checks blocks built on each threshold."""
     h, w = rgb.shape[0] // FLAT_BLOCK * FLAT_BLOCK, rgb.shape[1] // FLAT_BLOCK * FLAT_BLOCK
-    x = rgb[:h, :w].astype(np.float32).reshape(h // FLAT_BLOCK, FLAT_BLOCK, w // FLAT_BLOCK, FLAT_BLOCK, 3)
-    sd = x.std(axis=(1, 3)).max(axis=-1)
-    return {t: float((sd < t).mean()) for t in (1.5, FLAT_STD, 6.0)}
+    x = rgb[:h, :w].reshape(h // FLAT_BLOCK, FLAT_BLOCK, w // FLAT_BLOCK, FLAT_BLOCK, 3)
+    n = FLAT_BLOCK * FLAT_BLOCK
+    s1 = x.sum(axis=(1, 3), dtype=np.int64)
+    s2 = (x.astype(np.int64) ** 2).sum(axis=(1, 3))
+    spread = (n * s2 - s1 * s1).max(axis=-1)                          # n * n * variance, of the largest channel
+    return {t: float((spread < (n * t) ** 2).mean()) for t in (1.5, FLAT_STD, 6.0)}
 
 
 def largest_thing(rgb):
+    import cv2
     q = (rgb // 32).astype(np.int32)
     code = q[..., 0] * 64 + q[..., 1] * 8 + q[..., 2]
     bgc = np.bincount(code.ravel()).argmax()
-    bg = (np.array([bgc // 64, (bgc // 8) % 8, bgc % 8]) * 32 + 16).astype(np.float32)
-    fg = (np.linalg.norm(rgb.astype(np.float32) - bg, axis=-1) > FG_DIST).astype(np.uint8)
+    bg = np.array([bgc // 64, (bgc // 8) % 8, bgc % 8]) * 32 + 16
+    # distance over FG_DIST as whole numbers: sqrt(n) > d exactly when n > d * d for whole n and d
+    d = rgb.astype(np.int32) - bg.astype(np.int32)
+    fg = ((d * d).sum(axis=-1) > FG_DIST * FG_DIST).astype(np.uint8)
     fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
     n, labels, stats, _ = cv2.connectedComponentsWithStats(fg, 8)
     if n <= 1:
@@ -117,6 +130,7 @@ def largest_thing(rgb):
 
 
 def frame_measures(rgb):
+    import cv2
     fam, sat, fam_sens = colour_families(rgb)
     luma = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     p5, p95 = np.percentile(luma, [5, 95])
@@ -124,11 +138,12 @@ def frame_measures(rgb):
     lap = cv2.Laplacian(luma, cv2.CV_32F)
     area, box = largest_thing(rgb)
     return {"families": fam, "families_by_min": fam_sens, "luma_mean": float(luma.mean() / 255), "saturation": sat, "spread": float((p95 - p5) / 255), "flat": flat_share(rgb),
-            "edge": float((edges > 0).mean()), "detail": float(np.abs(lap).mean() / 255), "largest_area": area, "largest_box": box}
+            "edge": cv2.countNonZero(edges) / edges.size, "detail": float(np.abs(lap).mean() / 255), "largest_area": area, "largest_box": box}
 
 
 # ---- sheets ------------------------------------------------------------------------------------------------------
 def stamp(im, text, size=14):
+    from PIL import ImageDraw
     d = ImageDraw.Draw(im)
     f = font(size)
     x0, y0, x1, y1 = d.textbbox((0, 0), text, font=f)
@@ -138,6 +153,7 @@ def stamp(im, text, size=14):
 
 
 def grid(tiles, cols, tw, th, pad=0):
+    from PIL import Image
     rows = (len(tiles) + cols - 1) // cols
     out = Image.new("RGB", (cols * tw + (cols - 1) * pad, rows * th + (rows - 1) * pad), (40, 40, 40))
     for i, t in enumerate(tiles):
@@ -145,10 +161,25 @@ def grid(tiles, cols, tw, th, pad=0):
     return out
 
 
-def window_frames(path, a, b, w=320, h=180):
-    p = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(path), "-vf",
-                        f"select='between(n\\,{a}\\,{b})',scale={w}:{h}:flags=area", "-fps_mode", "passthrough", "-f", "rawvideo",
-                        "-pix_fmt", "rgb24", "-"], capture_output=True, creationflags=NO_WINDOW)
+def window_frames(path, a, b, w=320, h=180, times=None, seekable=None):
+    """Frames a..b inclusive at w x h: sought half way back to frame a - 1 and stopped after b - a + 1 frames where the
+    file can be sought by frame (film_diff.packet_clock), else picked by number from a decode from the start."""
+    from PIL import Image
+    from film_diff import packet_clock
+    if b < a:
+        return []
+    if seekable is None:
+        read, seekable = packet_clock(path)
+        times = read if times is None else times
+    if seekable and a >= len(times):
+        return []
+    if seekable:
+        ss = 0.0 if a <= 0 else float(times[a - 1] + times[a]) / 2
+        cmd = ["-ss", f"{ss:.6f}", "-i", str(path), "-vf", f"scale={w}:{h}:flags=area", "-fps_mode", "passthrough", "-frames:v", str(b - a + 1)]
+    else:
+        cmd = ["-i", str(path), "-vf", f"select='between(n\\,{a}\\,{b})',scale={w}:{h}:flags=area", "-fps_mode", "passthrough"]
+    p = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", *cmd, "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                       capture_output=True, creationflags=NO_WINDOW)
     n = w * h * 3
     return [Image.frombytes("RGB", (w, h), p.stdout[i:i + n]) for i in range(0, len(p.stdout) - n + 1, n)]
 
@@ -196,7 +227,7 @@ MODEL = "small"   # faster-whisper's model, read from the Hugging Face cache onl
 from lean import transcriber  # noqa: E402  why this machine can't transcribe, or None (doctor asks it too)
 
 
-def words_of(path, out, skip=False):
+def words_of(path, out, skip=False, has_audio=True, samples=None):
     """(words with their times, how they were got: TRANSCRIBED, TOLD or "not transcribed: why"). The transcriber is
     the one heavy part of a measure, so only it waits in the machine's queue (and says so at once); --no-voice skips it
     and the queue. A transcriber that is missing (the package, or its model on this machine) is not a film with no voice:
@@ -207,6 +238,10 @@ def words_of(path, out, skip=False):
         return [], TOLD
     if cache.exists():
         return json.loads(cache.read_text(encoding="utf-8")), TRANSCRIBED
+    if not has_audio:
+        # a file with no sound stream holds no speech: nothing to transcribe, and no transcriber loaded or queued for
+        cache.write_text("[]", encoding="utf-8")
+        return [], TRANSCRIBED
     os.environ["HF_HUB_OFFLINE"] = "1"  # local model only; nothing is fetched
     why = transcriber()
     if why is None:
@@ -215,9 +250,7 @@ def words_of(path, out, skip=False):
         print(f"measure_film: {NOT_TRANSCRIBED}: {why}; the film's word measures are left out, not counted as no voice "
               "(give --no-voice for a film that has none)", file=sys.stderr)
         return [], f"{NOT_TRANSCRIBED}: {why}"
-    p = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(path), "-vn", "-ac", "1", "-ar", "16000",
-                        "-f", "f32le", "-"], capture_output=True, creationflags=NO_WINDOW)
-    x = np.frombuffer(p.stdout, np.float32)
+    x = pcm(path) if samples is None else samples
     held = None
     try:
         import raea_run
@@ -276,8 +309,8 @@ def lufs(path):
     return (float(i[-1]) if i else None), (float(lra[-1]) if lra else None)
 
 
-def sound(path, ws, dur):
-    x = pcm(path)
+def sound(path, ws, dur, samples=None):
+    x = pcm(path) if samples is None else samples
     sr = 16000
     half = int(sr * 0.5)
     curve = [db(x[i:i + half]) for i in range(0, len(x), half)]
@@ -326,6 +359,9 @@ def runs(mask, fps):
 
 
 def main():
+    import cv2
+    from PIL import Image, ImageDraw
+    from measure import chance_shares, near_shares
     ap = argparse.ArgumentParser()
     ap.add_argument("film")
     ap.add_argument("out")
@@ -338,11 +374,21 @@ def main():
     info = probe(film)
     fps, dur = info["fps"], info["duration"]
 
-    # product tools
-    for name, cmd in (("vd", [sys.executable, str(TOOLS / "measure.py"), str(film), "--out", str(out / "vd")]),
-                      ("see", [sys.executable, str(TOOLS / "see.py"), str(film), "--out", str(out / "see")])):
-        if not (a.skip_tools and (out / name).exists()):
-            subprocess.run(cmd, check=True, creationflags=NO_WINDOW, stdout=subprocess.DEVNULL)
+    # product tools, run in this process: two more Pythons each loaded numpy, OpenCV and the film's probes again. measure's
+    # beat sheets are left out (this report draws its own sheets; nothing reads vd/beats-*.jpg)
+    import contextlib
+    import io
+    if not (a.skip_tools and (out / "vd").exists()):
+        import measure as measure_py
+        with contextlib.redirect_stdout(io.StringIO()):
+            measure_py.measure(film, out / "vd", sheets=False)
+    if not (a.skip_tools and (out / "see").exists()):
+        import see as see_py
+        if int(cv2.__version__.split(".")[0]) >= 5:   # as see.py says it
+            print(f"warning: this is OpenCV {cv2.__version__}. The distances this tool reports were checked on OpenCV 4, and on 5.0.0 it gets fast and faint moves wrong. "
+                  "Installing the skill's requirements.txt puts 4 back.", file=sys.stderr)
+        with contextlib.redirect_stdout(io.StringIO()):
+            see_py.analyse(film, out / "see")
     vd = json.loads((out / "vd" / "measure.json").read_text(encoding="utf-8"))
     see = json.loads((out / "see" / "motion.json").read_text(encoding="utf-8"))
 
@@ -354,7 +400,9 @@ def main():
         changes.append({"first": j["first"], "last": j["last"], "kind": j["kind"], "t0": round(j["first"] / fps, 3),
                         "t1": round((j["last"] + 1) / fps, 3), "t": round((j["first"] + j["last"] + 1) / 2 / fps, 3)})
     shot_lens = [s["dur"] for s in shots]
-    ws, heard = words_of(film, out, skip=a.no_voice)
+    # the sound at 16 kHz, decoded once for the transcriber and the sound measures (each decoded it)
+    pcm16 = pcm(film) if info["audio"] else None
+    ws, heard = words_of(film, out, skip=a.no_voice, has_audio=info["audio"], samples=pcm16)
     unknown = heard.startswith(NOT_TRANSCRIBED)
     sgaps = sentence_gaps(ws)
     tol = SYNC_FRAMES / fps
@@ -381,8 +429,9 @@ def main():
     diffs, samples, prev = [], [], None
     targets = {int(round(k * SAMPLE_EVERY * fps)) for k in range(int(dur / SAMPLE_EVERY) + 1)}
     for i, f in enumerate(frames(film, FW, FH)):
-        g = cv2.cvtColor(cv2.resize(f, (DIFF_W, DIFF_H), interpolation=cv2.INTER_AREA), cv2.COLOR_RGB2GRAY).astype(np.int16)
-        diffs.append(0.0 if prev is None else float(np.abs(g - prev).mean()))
+        g = cv2.cvtColor(cv2.resize(f, (DIFF_W, DIFF_H), interpolation=cv2.INTER_AREA), cv2.COLOR_RGB2GRAY)
+        # a whole-number sum divided once: the mean the int16 difference gave
+        diffs.append(0.0 if prev is None else int(cv2.absdiff(g, prev).sum(dtype=np.int64)) / g.size)
         prev = g
         if i in targets:
             samples.append((i, i / fps, frame_measures(f), Image.fromarray(f.copy())))
@@ -422,27 +471,27 @@ def main():
     o = np.array(onsets)
 
     def near(ts):
-        return float(np.mean([np.min(np.abs(o - t)) <= tol for t in ts])) if len(ts) and len(o) else None
+        return float(near_shares(o, ts, tol)) if len(ts) and len(o) else None
     rng = np.random.default_rng(0)
-    chance = float(np.mean([near((np.array(events) + rng.uniform(0, dur)) % dur) for _ in range(500)])) if events and len(o) else None
+    chance = chance_shares(events, o, dur, tol, rng, 500) if events and len(o) else None
     hits = [e for e in events if len(o) and np.min(np.abs(o - e)) <= tol]
     sync_sens = {}
     for k in (1, 2, 3):
         t2 = k / fps
-        hit_k = float(np.mean([np.min(np.abs(o - t)) <= t2 for t in events])) if events and len(o) else None
-        ch_k = float(np.mean([np.mean([np.min(np.abs(o - t)) <= t2 for t in (np.array(events) + rng.uniform(0, dur)) % dur]) for _ in range(500)])) if events and len(o) else None
+        hit_k = float(near_shares(o, events, t2)) if events and len(o) else None
+        ch_k = chance_shares(events, o, dur, t2, rng, 500) if events and len(o) else None
         sync_sens[f"{k}f"] = [hit_k, ch_k]
     large_sens = {}
     for lt in (0.02, LARGE_AREA, 0.20):
         ev = dedupe([c["t0"] for c in changes] + see_starts(lt))
-        ch = float(np.mean([near((np.array(ev) + rng.uniform(0, dur)) % dur) for _ in range(500)])) if ev and len(o) else None
+        ch = chance_shares(ev, o, dur, tol, rng, 500) if ev and len(o) else None
         large_sens[f"area>={lt}"] = {"events": len(ev), "hit": near(ev), "chance": ch}
     ev = dedupe([c["t0"] for c in changes] + [m["t0"] for m in moves if m["peak"] >= LARGE_MOVE])
     large_sens[f"framediff_runs_peak>={LARGE_MOVE}"] = {"events": len(ev), "hit": near(ev),
-                                                     "chance": float(np.mean([near((np.array(ev) + rng.uniform(0, dur)) % dur) for _ in range(500)])) if ev and len(o) else None}
+                                                     "chance": chance_shares(ev, o, dur, tol, rng, 500) if ev and len(o) else None}
 
     # E. sound
-    snd = sound(film, ws, dur) if info["audio"] else None
+    snd = sound(film, ws, dur, pcm16) if info["audio"] else None
     if snd and unknown:   # the lengths around the words are unknown with the words, not zero
         snd.update(gap_seconds=None, head_seconds=None, tail_seconds=None)
     onset_rate = len(onsets) / dur
@@ -471,9 +520,13 @@ def main():
         g.save(fn, quality=88)
         sheet_files.append(fn)
     win_files = []
+    win_times = win_seekable = None
     for k, c in enumerate(changes):
+        if win_times is None:
+            from film_diff import packet_clock
+            win_times, win_seekable = packet_clock(film)
         a0, b0 = max(0, c["first"] - WINDOW_SIDE), min(n - 1, c["last"] + WINDOW_SIDE)
-        ims = window_frames(film, a0, b0)
+        ims = window_frames(film, a0, b0, times=win_times, seekable=win_seekable)
         ims = [stamp(im, f"f{a0 + j} {(a0 + j) / fps:5.2f}s", 12) for j, im in enumerate(ims)]
         g = grid(ims, 6, 320, 180, 2)
         fn = out / "windows" / f"change-{k + 1:02d}.jpg"

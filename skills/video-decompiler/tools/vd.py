@@ -208,8 +208,7 @@ def main(argv=None):
                        ("foley", "not proven: a sound track made by rule from the film's code"), ("evolve", "not proven: four world sketches as a blind line-up"),
                        ("playable", "not proven: a browser page that imitates the film"), ("audio", "not proven: clean a voice, measure a track, draw its sound"),
                        ("bridge", "not proven: the export's cuts for an editor or legible-film")):
-        p = sub.add_parser(name, help=what + " (vd " + name + " --help)", add_help=False)
-        p.set_defaults(fn=lambda _a, _argv=argv: _run_lean(_argv))
+        sub.add_parser(name, help=what + " (vd " + name + " --help)", add_help=False)
     if not argv:
         ap.print_help()
         return 0

@@ -23,8 +23,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-import numpy as np
-
 TOOLS = Path(__file__).resolve().parent
 sys.path.insert(0, str(TOOLS))
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0
@@ -44,10 +42,10 @@ def db(amp):
     return float(20.0 * math.log10(max(float(amp), 1e-12)))
 
 
-def meter_loudness(ffmpeg, path):
+def meter_loudness(ffmpeg, path, target_i=-20):
     cmd = [
         ffmpeg, "-hide_banner", "-nostats", "-nostdin", "-i", str(path), "-map", "0:a:0",
-        "-af", "loudnorm=I=-20:LRA=11:TP=-1:print_format=json", "-f", "null", "-",
+        "-af", f"loudnorm=I={target_i:g}:LRA=11:TP=-1:print_format=json", "-f", "null", "-",
     ]
     r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
     matches = re.findall(r'\{[^{}]*"input_i"[^{}]*\}', r.stderr, re.DOTALL)
@@ -67,6 +65,7 @@ def meter_loudness(ffmpeg, path):
 
 def measure_file(ffmpeg, path):
     """Measure overlapping spectral windows (200-5000 Hz speech body vs 5000-9000 Hz sibilance) and 20 ms RMS."""
+    import numpy as np
     cmd = [ffmpeg, "-v", "error", "-nostdin", "-i", str(path), "-ac", "2", "-ar", str(RATE), "-f", "f32le", "-"]
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=NO_WINDOW)
     hop = RATE // 2

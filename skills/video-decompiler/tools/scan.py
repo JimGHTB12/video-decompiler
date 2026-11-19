@@ -63,19 +63,65 @@ def uneven(film, fps):
     return avg if avg > 0 and abs(avg - fps) > 0.01 * fps else None
 
 
-def changes(film, w=W, h=H, two=False):
+_UNSET = object()
+
+
+def probe(film):
+    """(fps, avg, expect, sound) from one ffprobe: rate(), uneven(), decode.frame_count() and has_sound() read the
+    file four times for them. The same rules and the same words when a rate can't be read."""
+    import json
+    p = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,r_frame_rate,avg_frame_rate,nb_frames:format=duration",
+                        "-of", "json", str(film)], capture_output=True, text=True, creationflags=NO_WINDOW)
+    try:
+        info = json.loads(p.stdout or "{}")
+    except ValueError:
+        info = {}
+    streams = info.get("streams") or []
+    video = next((x for x in streams if x.get("codec_type") == "video"), None)
+    try:
+        fps = float(Fraction((video or {})["r_frame_rate"].split(",")[0]))
+    except (KeyError, ValueError, ZeroDivisionError):
+        raise SystemExit(f"{film}: ffprobe could not read its frame rate ({p.stderr.strip()[-200:] or 'no video stream'})")
+    if fps <= 0:
+        raise SystemExit(f"{film}: ffprobe gave a frame rate of {fps}")
+    try:
+        avg = float(Fraction(video.get("avg_frame_rate", "").split(",")[0]))
+    except (ValueError, ZeroDivisionError):
+        avg = None
+    avg = avg if avg is not None and avg > 0 and abs(avg - fps) > 0.01 * fps else None
+    try:
+        expect = int(video["nb_frames"])
+    except (KeyError, ValueError):
+        try:
+            a, b = video["r_frame_rate"].split("/")
+            expect = int(float(info.get("format", {})["duration"]) * float(a) / float(b))
+        except (KeyError, ValueError, ZeroDivisionError):
+            expect = None
+    return fps, avg, expect, any(x.get("codec_type") == "audio" for x in streams)
+
+
+def changes(film, w=W, h=H, two=False, expect=_UNSET):
     """d[i], the change from frame i to frame i + 1; with two, also d2[i], from frame i to frame i + 2 (a flash's
     neighbours). Decoded frame by frame and never held whole: 38 s at 60 a second is 600 MB as the scripts held it."""
     import decode
     cmd = ["ffmpeg", "-v", "error", "-i", str(film), "-vf", f"scale={w}:{h}", "-f", "rawvideo", "-pix_fmt", "gray", "-"]
     size, d, d2, back = w * h, [], [], []
+    hi, lo = np.empty(size, np.uint8), np.empty(size, np.uint8)
+
+    def change(f, g):
+        # |f - g| in uint8 (the larger less the smaller), summed as a whole number and divided once: the mean the int16
+        # difference gave, without an int16 copy and a float64 one of every frame
+        np.maximum(f, g, out=hi)
+        np.minimum(f, g, out=lo)
+        np.subtract(hi, lo, out=lo)
+        return int(lo.sum(dtype=np.int64)) / size
     # checked: a damaged film read by ffmpeg exits 0 with half its pictures, and its scan passed (decode.py)
-    for buf in decode.pictures(cmd, size, str(film), expect=decode.frame_count(film)):
-        f = np.frombuffer(buf, np.uint8).astype(np.int16)
+    for buf in decode.pictures(cmd, size, str(film), expect=decode.frame_count(film) if expect is _UNSET else expect):
+        f = np.frombuffer(buf, np.uint8)
         if back:
-            d.append(float(np.abs(f - back[-1]).mean()))
+            d.append(change(f, back[-1]))
         if two and len(back) == 2:
-            d2.append(float(np.abs(f - back[0]).mean()))
+            d2.append(change(f, back[0]))
         back = (back + [f])[-2:]
     return (np.array(d), np.array(d2)) if two else np.array(d)
 
@@ -115,10 +161,10 @@ def holds(d, fps, still=STILL, least=LEAST):
     return out
 
 
-def windows(film, fps, k, win=1.0, spans=None):
-    """The k one-second stretches with the most change, not overlapping, as start times in time order (an earlier
-    script's rule: change at 320 x 180, summed over each second, the largest taken and its neighbourhood shut). With
-    spans [(from s, to s)], only stretches wholly inside one of them (a long reference shown by its ends)."""
+def windows(film, fps, k, win=1.0, spans=None, ranked=False):
+    """The k one-second stretches with the most change, not overlapping, as start times in time order (or biggest-change
+    order when `ranked` is true, so lineup/ and alone/ slice their own counts from one scan). With spans [(from s, to s)],
+    only stretches wholly inside one of them (a long reference shown by its ends)."""
     d = changes(film, 320, 180)
     n = max(1, int(round(win * fps)))
     if len(d) < n:                          # a film shorter than the stretch: the whole film is the one stretch
@@ -136,7 +182,8 @@ def windows(film, fps, k, win=1.0, spans=None):
             break
         picks.append(i)
         score[max(0, i - n):i + n] = -1
-    return sorted(i / fps for i in picks)
+    times = [i / fps for i in picks]
+    return times if ranked else sorted(times)
 
 
 def has_sound(film):
@@ -145,16 +192,15 @@ def has_sound(film):
     return bool(p.stdout.strip())
 
 
-def scan(film, to=None):
+def scan(film, to=None, level=None):
     """(the SCAN block, the fix lines: pops only). The block ends with the fix lines, then the `check:` lines (holds
     over LONG). Written to `to` as well when given."""
     import lean   # its loudness is the one vd sound reports
     film = Path(film)
-    fps = rate(film)
-    d, d2 = changes(film, two=True)
+    fps, avg, expect, sound = probe(film)
+    d, d2 = changes(film, two=True, expect=expect)
     n = len(d) + 1
     lines = [f"SCAN {film.name}: {n} frames at {fps:g} a second ({n / fps:.2f} s)"]
-    avg = uneven(film, fps)
     if avg:
         lines.append(f"  timing: this film's frames are not evenly spaced (about {avg:.3g} a second on average, counted here at {fps:g}), so the seconds below can be off: "
                      f"trust the frame numbers, or scan a copy made at one rate (ffmpeg -i FILM -fps_mode cfr -r {round(avg):g} COPY.mp4)")
@@ -175,8 +221,8 @@ def scan(film, to=None):
         if b - a > LONG:
             checks.append(f"check: the picture stands still from {a:.2f} to {b:.2f} s ({b - a:.2f} s); keep it only if you chose it: a chosen hold creeps or breathes")
     lines.append(f"    long holds total {sum(b - a for a, b in hs):.2f} s")
-    if has_sound(film):
-        lufs, tp = lean.loudness(film)
+    if sound:
+        lufs, tp = lean.loudness(film) if level is None else level
         off = lean.level_faults(lufs, tp)
         lines.append(f"  loudness: {lufs} LUFS integrated, true peak {tp} dBTP (aim {lean.LUFS_AIM:g} within {lean.LUFS_WITHIN:g}, peak under {lean.PEAK_UNDER:g})"
                      + ("; " + "; ".join(off) if off else ": ok"))

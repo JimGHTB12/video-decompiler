@@ -40,7 +40,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from film_diff import NO_WINDOW, check_decode, check_window, clock, ffprobe, find_cuts, fps_of, seek_to, stop_decoder  # noqa: E402
+from film_diff import NO_WINDOW, check_decode, check_window, ffprobe, find_cuts, fps_of, packet_clock, packet_times, seek_to, shown_index, stop_decoder  # noqa: E402
 import space  # noqa: E402
 
 AW, AH = 320, 180
@@ -94,20 +94,26 @@ def analysed_frame(path, fps, k):
 
 
 LOOK_W, LOOK_H = 960, 540  # holds are looked at this size: at AW x AH a 3 px gap between headline lines vanishes
-VERSION = 10              # bump when a measure changes, so compares never mix measurements made two ways (5: the summary
+VERSION = 12              # bump when a measure changes, so compares never mix measurements made two ways (5: the summary
                           # says how the film moves, as a scene or as a sheet being slid, read by space.py. 6: and in how
                           # many of its frames the middle is lit and all four corners are darker. 7: a beat-grid fit; 8: tempo_map's beat-grid fit, which reads Stet as 150, not 75; 9: each hold's ground, its border's commonest colour;
-                          # 10: a keyframe's compression pulse over a still picture is no change, quiet_keyframes)
+                          # 10: a keyframe's compression pulse over a still picture is no change, quiet_keyframes; 11: keyframe_times subtracts start_time;
+                          # 12: keyframes placed on the energy curve's own origin, the file's start, where sound starts before picture or preroll)
 DARKER = 0.9              # a corner is darker than the middle when it gives off less than nine tenths of its light
 LIT = 0.02                # and a middle this dark isn't lit at all: a black frame is not a lit middle
 
 
-def lit_middle(rgb):
+# light given off for each stored grey, by the same float32 sum the whole frame took: a table lookup in place of a
+# power of every pixel (the values are equal bit for bit, test_measure checks all 256)
+GAMMA22 = (np.arange(256, dtype=np.float32) / 255) ** 2.2
+
+
+def lit_middle(rgb, grey=None):
     """Is this frame a lit middle with four darker corners? The middle is the centre ninth of the frame and a corner is a
     thirty-sixth, compared in light given off, not in the numbers a file stores. Every film a fresh agent made with this
     skill was that picture in 78% to 95% of its frames: a vignette pasted from an example, a ground that darkens round
     the middle of the frame and a subject always in the centre add up to it. The middle studio film is, in 28%."""
-    light = (cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255) ** 2.2
+    light = GAMMA22[cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY) if grey is None else grey]
     h, w = light.shape
     middle = float(light[h // 3:2 * h // 3, w // 3:2 * w // 3].mean())
     a, b = h // 6, w // 6
@@ -115,14 +121,50 @@ def lit_middle(rgb):
     return middle > LIT and all(float(c.mean()) < DARKER * middle for c in corners)
 
 
-def grab(path, t, times=None):
+BATCH = 48   # frames per ffmpeg call: under ffmpeg's ~100-term select parser limit and Windows's 32k command line
+
+
+def grab_batch(path, target_times, w, h, clock_times=None, seekable=None):
+    """For each time in target_times, the RGB24 bytes of the nearest frame at w x h (or None past EOF), in batches: each
+    from its own seek where the file can be sought by frame (film_diff.packet_clock), else picked by number from a
+    decode from the start."""
+    if len(target_times) == 0:   # a NumPy array of times: one at 0.0 read as none, two raised (an R2 review's finding)
+        return []
+    if seekable is None:   # a caller's own clock is kept; only whether it can be sought by is read here
+        read, seekable = packet_clock(path)
+        clock_times = read if clock_times is None else clock_times
+    want = [seek_to(clock_times, t)[1] for t in target_times]
+    frames, got, sz = sorted(set(want)), {}, w * h * 3
+    for b in range(0, len(frames), BATCH):
+        part = frames[b:b + BATCH]
+        if seekable:
+            first = part[0]
+            ss = 0.0 if first == 0 else float(clock_times[first - 1] + clock_times[first]) / 2
+            seek, nums = ["-ss", f"{ss:.6f}"], [f - first for f in part]
+        else:
+            # each packet's picture in a decode from the start: a batch whose first time fell in preroll, never shown,
+            # counted every later pick from the wrong picture ([3, 6, 34] for single grabs' [3, 3, 31], an R2 review's finding)
+            seek, nums = [], [shown_index(clock_times, f) for f in part]
+        shown = sorted(set(nums))
+        pick = "+".join(f"eq(n\\,{d})" for d in shown)
+        p = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", *seek, "-i", str(path), "-vf",
+                            f"select='{pick}',scale={w}:{h}", "-fps_mode", "passthrough", "-frames:v", str(len(shown)),
+                            "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, creationflags=NO_WINDOW)
+        pics = {d: p.stdout[k * sz:(k + 1) * sz] for k, d in enumerate(shown) if (k + 1) * sz <= len(p.stdout)}
+        got.update({f: pics[d] for f, d in zip(part, nums) if d in pics})
+    return [got.get(f) for f in want]
+
+
+def grabs(path, target_times, times=None, seekable=None):
+    """The frames nearest target_times, at LOOK_W x LOOK_H, fetched in batches instead of one ffmpeg per hold."""
+    return [None if raw is None else np.frombuffer(raw, np.uint8).reshape(LOOK_H, LOOK_W, 3)
+            for raw in grab_batch(path, target_times, LOOK_W, LOOK_H, times, seekable)]
+
+
+def grab(path, t, times=None, seekable=None):
     """The frame nearest time t, at LOOK_W x LOOK_H, for a hold's look. Seeking to t printed to 3 decimals returned the
     next frame one time in three; seek_to lands on the frame itself."""
-    at = seek_to(clock(path) if times is None else times, t)[0]
-    p = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", f"{at:.6f}", "-i", str(path), "-frames:v", "1", "-vf", f"scale={LOOK_W}:{LOOK_H}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, creationflags=NO_WINDOW)
-    if len(p.stdout) < LOOK_W * LOOK_H * 3:
-        return None
-    return np.frombuffer(p.stdout[:LOOK_W * LOOK_H * 3], np.uint8).reshape(LOOK_H, LOOK_W, 3)
+    return grabs(path, [t], times, seekable)[0]
 
 
 def background(rgb):
@@ -135,7 +177,11 @@ def background(rgb):
 
 def look(rgb):
     """Occupancy, detail, ink bands and palette of one still."""
-    mask = np.abs(rgb.astype(int) - background(rgb)).max(axis=2) > 40
+    bg = background(rgb)
+    # ink is any channel more than 40 from the ground's: for whole-number pixels that is outside [ceil(bg - 40),
+    # floor(bg + 40)], the same pixels as |pixel - bg| > 40, found by OpenCV without int64 and float64 copies of the still
+    lo, hi = np.clip(np.ceil(bg - 40), 0, 255), np.clip(np.floor(bg + 40), 0, 255)
+    mask = cv2.inRange(rgb, tuple(float(v) for v in lo), tuple(float(v) for v in hi)) == 0
     rows = mask.mean(axis=1) > 0.004
     bands, start = [], None
     for y, on in enumerate(list(rows) + [False]):
@@ -153,24 +199,16 @@ def look(rgb):
     _, labels, centres = cv2.kmeans(small, 4, None, (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0), 2, cv2.KMEANS_PP_CENTERS)
     share = np.bincount(labels.ravel(), minlength=4) / len(labels)
     palette = sorted(((("#%02x%02x%02x" % tuple(int(v) for v in c)), round(float(s), 3)) for c, s in zip(centres, share)), key=lambda x: -x[1])
-    ground = "#%02x%02x%02x" % tuple(int(round(v)) for v in background(rgb))
+    ground = "#%02x%02x%02x" % tuple(int(round(v)) for v in bg)
     return {"occupancy": round(float(mask.mean()), 3), "detail": round(float(cv2.Canny(gray, 60, 160).mean() / 255), 4), "ground": ground,
             "bands": [round(b, 3) for b in sorted(bands, reverse=True)[:6]], "largest_band": round(max(bands), 3) if bands else 0.0, "palette": palette}
 
 
-def keyframe_times(path):
-    """The presentation times of the file's keyframes, read from its packets (nothing decoded)."""
-    p = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time,flags", "-of", "csv=p=0", str(path)],
-                       capture_output=True, text=True, creationflags=NO_WINDOW)
-    out = []
-    for line in p.stdout.splitlines():
-        t, _, flags = line.partition(",")
-        try:
-            if "K" in flags:
-                out.append(float(t))
-        except ValueError:     # a packet with no time
-            pass
-    return sorted(out)
+def keyframe_times(path, start_time=None):
+    """The presentation times of the file's keyframes from its start, read from its packets (nothing decoded)."""
+    return packet_times(path, start_time)[1]
+
+ENERGY_T0 = 0.0   # the time of energy[0] on the file's clock (see measure)
 
 
 def quiet_keyframes(energy, keys, first, fps):
@@ -248,24 +286,39 @@ def audio(path, duration):
     return {"onsets": [round(i * hop / 16000, 3) for i in onsets], "tempo": tempo, "mean_db": round(float(loud.mean()), 1) if len(loud) else None}
 
 
+def near_shares(onsets, ts, tolerance):
+    """For each row of times ts, the share within `tolerance` of an onset: the booleans np.min(np.abs(o - t)) <= tolerance
+    gave one time at a time, from the two onsets either side of each time (the nearest is one of them, and a rounded
+    difference keeps their order), so every share is the same number."""
+    o = np.sort(np.asarray(onsets, float))
+    ts = np.asarray(ts, float)
+    i = np.searchsorted(o, ts)
+    right = np.abs(o[np.minimum(i, len(o) - 1)] - ts)
+    left = np.abs(ts - o[np.maximum(i - 1, 0)])
+    return (np.minimum(left, right) <= tolerance).mean(axis=-1)
+
+
+def chance_shares(events, onsets, duration, tolerance, rng, trials):
+    """The mean share over `trials` random shifts of the events round the film: the shifts drawn one by one in the old
+    order, then every trial at once (it ran thousands of Python loops)."""
+    shifts = np.array([rng.uniform(0, duration) for _ in range(trials)])
+    return float(near_shares(onsets, (np.asarray(events, float)[None, :] + shifts[:, None]) % duration, tolerance).mean())
+
+
 def sync_rate(events, onsets, duration, tolerance=SYNC, trials=300, seed=0):
     if not events or not onsets:
         return None, None
-    o = np.array(onsets)
-    near = lambda ts: float(np.mean([np.min(np.abs(o - t)) <= tolerance for t in ts]))
     rng = np.random.default_rng(seed)
-    chance = float(np.mean([near((np.array(events) + rng.uniform(0, duration)) % duration) for _ in range(trials)]))
-    return round(near(events), 3), round(chance, 3)
+    chance = chance_shares(events, onsets, duration, tolerance, rng, trials)
+    return round(float(near_shares(onsets, events, tolerance)), 3), round(chance, 3)
 
 
-def sheet(path, times, out, fps, clock_times=None):
+def sheet(path, times, out, fps, clock_times=None, seekable=None):
     tiles = []
-    clock_times = clock(path) if clock_times is None else clock_times
-    for t in times:
-        p = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", f"{seek_to(clock_times, t)[0]:.6f}", "-i", str(path), "-frames:v", "1", "-vf", "scale=320:180", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, creationflags=NO_WINDOW)
-        if len(p.stdout) < 320 * 180 * 3:
+    for t, raw in zip(times, grab_batch(path, times, 320, 180, clock_times, seekable)):
+        if raw is None:
             continue
-        im = Image.frombytes("RGB", (320, 180), p.stdout[:320 * 180 * 3])
+        im = Image.frombytes("RGB", (320, 180), raw)
         ImageDraw.Draw(im).rectangle([0, 0, 70, 16], fill=(0, 0, 0))
         ImageDraw.Draw(im).text((4, 2), f"{t + LABEL_OFFSET:6.2f}s", fill=(255, 255, 0))
         tiles.append(im)
@@ -347,20 +400,26 @@ def shift_times(r, dt):
         r["sound"]["onsets"] = [round(t + dt, 3) for t in r["sound"]["onsets"]]
 
 
-def measure(path, out, keys=None):
-    """keys: the keyframe times on this file's clock, when they are not its own (a window cut from a longer file)."""
+def measure(path, out, keys=None, sheets=True):
+    """keys: the keyframe times on this file's clock, when they are not its own (a window cut from a longer file).
+    sheets=False leaves out the beat sheets (measure_film draws its own and nothing reads these there)."""
     info = probe(path)
     fps = min(info["fps"], FPS_CAP)
-    times = clock(path)
+    read, own_keys = packet_times(path)   # the frames' times and the keyframes', in one read of the packets
+    times, seekable = packet_clock(path, times=read)
     energy, energy2, prev, prev2, lit = [], [], None, None, []
     for rgb in frames(path, fps, info["duration"]):
-        lit.append(lit_middle(rgb))
-        g = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
+        grey = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)   # one conversion a frame, for the lit middle and the change
+        lit.append(lit_middle(rgb, grey))
+        g = grey.astype(np.float32)
         energy.append(0.0 if prev is None else float(np.abs(g - prev).mean()))
         energy2.append(0.0 if prev2 is None else float(np.abs(g - prev2).mean()))  # change over two frames, for follows_speed
         prev2, prev = prev, g
     energy, energy2 = np.array(energy), np.array(energy2)
-    quiet_keyframes(energy, keyframe_times(path) if keys is None else keys, float(times[0]) if len(times) else 0.0, fps)
+    # energy[i] is the picture at i / fps from the file's start (start_time), the clock keyframe_times and the events use:
+    # where sound starts before picture the decode repeats the first picture back to 0, and preroll before 0 is never
+    # shown. Placing keys from the first packet's time instead put them a second late on a film whose sound led (a review's finding)
+    quiet_keyframes(energy, own_keys if keys is None else keys, ENERGY_T0, fps)
     cut_frames = find_cuts(energy)
     segs = segments(energy, fps)
     events = []
@@ -370,12 +429,11 @@ def measure(path, out, keys=None):
                 events[-1] = e
             continue
         events.append(e)
-    holds = []
-    for kind, a, b in segs:
-        if kind == "hold":
-            mid = (a + b) // 2
-            sharp = grab(path, mid / fps, times)
-            holds.append({"t0": round(a / fps, 3), "t1": round(b / fps, 3), "drift": round(float(np.median(energy[a:b])), 3), **look(sharp if sharp is not None else analysed_frame(path, fps, mid))})
+    hold_segs = [(a, b, (a + b) // 2) for kind, a, b in segs if kind == "hold"]
+    hold_pics = grabs(path, [mid / fps for _, _, mid in hold_segs], times, seekable)
+    holds = [{"t0": round(a / fps, 3), "t1": round(b / fps, 3), "drift": round(float(np.median(energy[a:b])), 3),
+              **look(sharp if sharp is not None else analysed_frame(path, fps, mid))}
+             for (a, b, mid), sharp in zip(hold_segs, hold_pics)]
     sound = audio(path, info["duration"]) if info["audio"] else None
     event_t = [round(e / fps, 3) for e in events]
     rate, chance = sync_rate(event_t, sound["onsets"], info["duration"]) if sound else (None, None)
@@ -403,7 +461,7 @@ def measure(path, out, keys=None):
         "tempo_bpm": sound["tempo"]["bpm"] if sound and sound["tempo"] else None,
         "move_peak": round(float(np.median([m["peak"] for m in readable])), 2) if readable else None,  # only moves whose easing could be read
     }
-    how = space.read(path)   # how it moves, as a scene or as a page: a second pass over the film, a few seconds
+    how = space.read(path, shape=(info["w"], info["h"]))   # how it moves, as a scene or as a page: a second pass over the film, a few seconds
     summary.update({"scene_move": how["scene_move"], "sheet_move": how["sheet_move"], "dark_corners": round(float(np.mean(lit)), 2) if lit else None})
     out.mkdir(parents=True, exist_ok=True)
     after = []
@@ -420,7 +478,7 @@ def measure(path, out, keys=None):
     result = {"version": VERSION, "video": str(path), **info, "analysed_fps": fps, "summary": summary, "cuts": [round(c / fps, 3) for c in cut_frames],
               "events": event_t, "segments": [{"kind": k, "t0": round(a / fps, 3), "t1": round(b / fps, 3)} for k, a, b in segs],
               "holds": holds, "moves": moves, "sound": sound, "energy": [round(float(x), 2) for x in energy], "energy_t0": 0.0}
-    result["sheets"] = sheet(path, [0.05] + after if not events or events[0] > 0 else after, out, fps, times)
+    result["sheets"] = sheet(path, [0.05] + after if not events or events[0] > 0 else after, out, fps, times, seekable) if sheets else []
     (out / "measure.json").write_text(json.dumps(result), encoding="utf-8")
     return result
 
@@ -670,7 +728,8 @@ def main():
         return show(measure(video, Path(args.out)))
     whole = probe(video)
     check_window(args.start, args.end, whole["duration"], video)
-    times = clock(video)
+    read, video_keys = packet_times(video)
+    times = packet_clock(video, times=read)[0]
     at, first = seek_to(times, args.start or 0.0)
     offset = float(times[first])  # the window starts on a frame, and its times are shifted by that frame's own time
     end = min(args.end if args.end is not None else whole["duration"], whole["duration"])
@@ -695,7 +754,7 @@ def main():
             raise SystemExit(f"the window cut from {video} has {got:.2f} s of pictures for the {wanted:.2f} s asked for: the file ends early or is damaged. Nothing was written. "
                              "If the file plays, make a clean copy first: ffmpeg -i IN -c:v libx264 -crf 12 -c:a aac OUT.mp4")
         # the copy has keyframes of its own; the source's pulses are in its pictures, at the source's keyframes
-        window_keys = [k - at for k in keyframe_times(video) if at <= k < end] + keyframe_times(Path(tmp) / "window.mp4")
+        window_keys = [k - at for k in video_keys if at <= k < end] + keyframe_times(Path(tmp) / "window.mp4")
         result = measure(Path(tmp) / "window.mp4", Path(args.out), keys=sorted(window_keys))
     shift_times(result, offset)
     # the record describes the file measured and the stretch of it, not the temporary copy

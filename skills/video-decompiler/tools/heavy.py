@@ -93,10 +93,14 @@ def accumulate(last, now):
 def watch(proc, idle, step=1.0):
     """Wait for the job; with `idle` (--stall), end it when it has used under 1 % of a core for that many seconds. (code, why)."""
     marks, last, used = [], {}, 0.0
+    if not idle:
+        return proc.wait(), None
     while proc.poll() is None:
-        time.sleep(step)
-        if proc.poll() is not None or not idle:
-            continue
+        # wait, not sleep: a sleep kept the queue for the rest of its step after the job had already ended
+        try:
+            return proc.wait(timeout=step), None
+        except subprocess.TimeoutExpired:
+            pass
         add, last = accumulate(last, cpu_by_pid(proc))
         used += add
         now = time.monotonic()

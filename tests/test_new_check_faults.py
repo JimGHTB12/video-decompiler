@@ -259,6 +259,40 @@ def test_the_accepted_films_have_no_wcag_flash():
         assert not r["classic_flagged"], (film, r["busiest_classic"], r["busiest_red"])
 
 
+def test_layer_masks_are_read_and_counted_as_their_runs_say():
+    # B8: masks are laid out with np.repeat and counted with bincount; each must be the flat list the runs spell, the
+    # counts each layer's pixels, a layer with none counting nothing (not an index past the end), and a frame with no
+    # runs the frame before it
+    with tempfile.TemporaryDirectory() as tmp:
+        rng = np.random.default_rng(6)
+        a = rng.integers(0, 4, (27, 48)) * (rng.random((27, 48)) < 0.9)
+        b = np.full((27, 48), 65535)
+        b[:3, :5] = 2
+        write_layers(Path(tmp) / "f.layers", [{"name": str(i)} for i in range(5)], {1: a, 2: b}, w=48, h=27)
+        head, masks = look.read_layers(Path(tmp) / "f.layers")
+        assert [int(v) for v in masks[1]] == a.ravel().tolist() and [int(v) for v in masks[2]] == b.ravel().tolist()
+        counts = look.layer_counts(masks[2])
+        assert counts == {2: 15, 65535: 27 * 48 - 15} and counts.get(4) is None and counts.get(70000) is None, counts
+        assert look.layer_counts(masks[1]) == {int(v): int((a == v).sum()) for v in np.unique(a)}
+
+
+def test_a_stated_field_order_answers_interlacing_and_an_unknown_one_is_read():
+    # B9: flash_scan asked ffprobe for every film's first 30 frames to learn whether it is interlaced; a stream that
+    # states its field order (progressive, or tt/bb/tb/bt) answers it from the one probe, and only "unknown" is read
+    from unittest.mock import patch
+    import flash_scan
+    with tempfile.TemporaryDirectory() as tmp:
+        clips = {"progressive.mp4": ["-c:v", "libx264", "-pix_fmt", "yuv420p"], "unknown.avi": ["-c:v", "mpeg4"],
+                 "tt.mp4": ["-vf", "setfield=tff", "-c:v", "libx264", "-flags", "+ildct+ilme", "-pix_fmt", "yuv420p"]}
+        for name, args in clips.items():
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25:duration=1", *args, str(Path(tmp) / name)], check=True)
+        real, read = flash_scan.interlaced, []
+        with patch.object(flash_scan, "interlaced", lambda fp, p: (read.append(Path(p).name), real(fp, p))[1]):
+            said = {name: flash_scan.screen_video(Path(tmp) / name)["screened_as"] for name in clips}
+        assert read == ["unknown.avi"], read
+        assert said["tt.mp4"].startswith("fields") and said["progressive.mp4"] == said["unknown.avi"] == "frames", said
+
+
 def test_scan_points_at_the_second_that_flashed():
     import flash_scan
     w, h = 320, 180
@@ -288,6 +322,50 @@ def test_scan_points_at_the_second_that_flashed():
             flash_scan.screen_video = real
         line = next(x for x in text.splitlines() if "motion or patterns" in x)
         assert "10 changes" in line and "3.0 s" in line, line
+        # Bb1: windowed screen_video reports positive duration_s, and early exit on Frames stops ffmpeg and closes stderr
+        import shutil
+        plusone = ROOT / "docs" / "media" / "plusone.mp4"
+        win = flash_scan.screen_video(plusone, start=5.0, end=7.0)
+        assert win["duration_s"] == 2.0 and win["frames"] == 120, win
+        fr = flash_scan.Frames(shutil.which("ffmpeg"), str(plusone), "scale=64:36,format=rgb24", 64 * 36 * 3)
+        with contextlib.closing(iter(fr)) as it:
+            next(it)
+        assert fr.proc.poll() is not None and fr.proc.stdout.closed and fr.proc.stderr.closed, (
+            fr.proc.poll(), fr.proc.stdout.closed, fr.proc.stderr.closed
+        )
+
+
+def test_a_red_flash_at_the_lowest_counting_byte_is_scanned_as_one_window_sees_it():
+    import flash_scan
+    # the byte where the one-window red detector starts to count, found here from its own red amount on pure red
+    pure = np.zeros((1, 256, 3), dtype=np.uint8)
+    pure[0, :, 0] = np.arange(256)
+    amount = flash_scan.red_amount(flash_scan.srgb_to_linear(pure))[0]
+    edge = int(np.flatnonzero(amount >= flash_scan.RED_THRESHOLD)[0])
+    assert amount[edge - 1] < flash_scan.RED_THRESHOLD <= amount[edge], (edge, amount[edge - 1], amount[edge])
+    w, h, fps = 192, 108, 10
+    with tempfile.TemporaryDirectory() as tmp:
+        for byte in (edge - 1, edge, edge + 1):
+            # black and pure red (byte, 0, 0) by turns, five times a second, in a lossless RGB file so the bytes survive
+            clip = Path(tmp) / f"red{byte}.mkv"
+            shown = [np.zeros((h, w, 3), dtype=np.uint8) for _ in range(30)]
+            for f in shown[1::2]:
+                f[..., 0] = byte
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}", "-r", str(fps),
+                            "-i", "-", "-c:v", "ffv1", "-pix_fmt", "bgr0", str(clip)], input=np.stack(shown).tobytes(), check=True)
+            decoded = subprocess.run(["ffmpeg", "-v", "error", "-i", str(clip), "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"],
+                                     capture_output=True, check=True).stdout
+            frames = np.frombuffer(decoded, np.uint8).reshape(-1, h, w, 3)
+            assert np.array_equal(frames, np.stack(shown)), byte
+            # the reference: one RedZig over the whole picture (every window of a flat frame sees the same thing)
+            one = flash_scan.RedZig()
+            for n, f in enumerate(frames):
+                one.push(n, flash_scan.red_amount(flash_scan.srgb_to_linear(f)))
+            one.finish()
+            want = flash_scan.busiest_second([n / fps for n in one.ends], 1e-9)
+            got = flash_scan.screen_video(clip)["busiest_red"]
+            assert (got["transitions_in_1s"], got["at_s"]) == want, (byte, got, want)
+            assert (want[0] > 6) == (byte >= edge), (byte, want)
 
 
 
@@ -305,6 +383,35 @@ def spring_curve(t, f, d):
     return 1 + (x0 - c2) * np.exp(a * t) + c2 * np.exp(b * t)
 
 
+def test_borrows_colour_reading_is_the_old_numbers():
+    # D4: Lab is taken only of the strongly coloured pixels, and each merged colour's Lab is kept; both must give the
+    # same numbers as taking Lab of everything each time, here on runs of every length up to 70 and colours on NEAR
+    import borrow
+    rng = np.random.default_rng(8)
+    px = rng.integers(0, 256, (2000, 3))
+    full = borrow.lab(px)
+    for n in range(1, 71):
+        idx = np.sort(rng.choice(len(px), n, replace=False))
+        assert np.array_equal(borrow.lab(px[idx]), full[idx]), n
+
+    def old_merge(items):
+        out = []
+        for c, w, notes in sorted(items, key=lambda x: -x[1]):
+            c = np.asarray(c, float)
+            g = next((g for g in out if borrow.apart(g["c"], c) < borrow.NEAR), None)
+            if g is None:
+                out.append({"c": c, "w": float(w), "notes": list(notes)})
+            else:
+                g["c"] = (g["c"] * g["w"] + c * w) / max(g["w"] + w, 1e-9)
+                g["w"] += float(w)
+                g["notes"] += list(notes)
+        return sorted(out, key=lambda g: -g["w"])
+    base = rng.integers(40, 216, (12, 3))
+    items = [(b + rng.normal(0, 3, 3), float(rng.uniform(0.1, 2)), [k]) for k, b in enumerate(np.repeat(base, 6, axis=0))]
+    a, b = old_merge(items), borrow.merge_near(items)
+    assert [(list(x["c"]), x["w"], x["notes"]) for x in a] == [(list(x["c"]), x["w"], x["notes"]) for x in b]
+
+
 def test_borrow_recovers_planted_springs_and_says_when_it_cannot():
     import borrow
     # the short moves are the 12 to 20 frames SKILL.md asks for; a grid made in move-relative units read 2.2 Hz as 5.0 there
@@ -318,6 +425,42 @@ def test_borrow_recovers_planted_springs_and_says_when_it_cannot():
     empty = borrow.fit_spring_profile([], dur=0.5)
     assert empty["fitted"] is False and empty["mse"] is None, empty
 
+
+
+def test_borrows_spring_grid_is_the_old_loop_to_the_bit():
+    # spring_velocity_curves works out the whole (freq, damp) grid as one array; each curve equals the one-at-a-time
+    # loop it replaced, bit for bit, under, at (exactly 1.0) and over critical damping
+    import math
+    import borrow
+    import measure
+
+    def old_curves(dur):
+        t = np.linspace(0.0, float(dur), measure.POINTS + 1)
+        grid, curves = [], []
+        for freq in borrow.FREQS:
+            w = 2.0 * math.pi * float(freq)
+            for damp in borrow.DAMPS:
+                damp = float(damp)
+                if damp < 1.0:
+                    wd = w * math.sqrt(1.0 - damp * damp)
+                    y = 1.0 - np.exp(-damp * w * t) * (np.cos(wd * t) + (damp * w / wd) * np.sin(wd * t))
+                elif damp == 1.0:
+                    y = 1.0 - np.exp(-w * t) * (1.0 + w * t)
+                else:
+                    r = math.sqrt(damp * damp - 1.0)
+                    a, b = -w * (damp - r), -w * (damp + r)
+                    c2 = a / (b - a)
+                    c1 = -1.0 - c2
+                    y = 1.0 + c1 * np.exp(a * t) + c2 * np.exp(b * t)
+                v = np.abs(np.diff(y))
+                curves.append(v / max(float(v.max()), 1e-9))
+                grid.append((float(freq), damp))
+        return tuple(grid), np.asarray(curves, dtype=np.float32)
+    assert {float(d) < 1.0 for d in borrow.DAMPS} == {True, False} and 1.0 in [float(d) for d in borrow.DAMPS]
+    for dur in (0.2, 0.517, 3.0):
+        grid, curves = borrow.spring_velocity_curves.__wrapped__(dur)
+        old_grid, old = old_curves(dur)
+        assert grid == old_grid and curves.dtype == old.dtype and np.array_equal(curves.view(np.uint32), old.view(np.uint32)), dur
 
 
 def test_borrow_takes_the_ground_from_the_border_and_the_octave_from_the_film():
@@ -353,7 +496,7 @@ def borrow_planted(tmp, m, frames=None, fps=12):
     frames[0][h // 2, w // 2] = np.random.default_rng().integers(0, 255, 3)   # a clip of its own each run: no other run's measures fit it
     clip = Path(tmp) / "ref.mp4"
     rgb_clip(clip, frames, fps)
-    planted = Path.home() / ".vd" / "measures" / ("borrow-" + hashlib.sha1(clip.read_bytes()).hexdigest()[:12])
+    planted = lean.vd_home() / "measures" / ("borrow-" + hashlib.sha1(clip.read_bytes()).hexdigest()[:12])
     planted.mkdir(parents=True, exist_ok=True)
     whole = {"version": measure.VERSION, "w": w, "h": h, "fps": fps, "duration": len(frames) / fps, "summary": {}, "events": [0.0],
              "cuts": [], "segments": [], "holds": [], "moves": [], "sound": None, **m}

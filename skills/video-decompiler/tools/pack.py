@@ -33,31 +33,25 @@ import secrets
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parent
 sys.path.insert(0, str(TOOLS))
+import lean  # noqa: E402
 W, COLS, ROWS, FPS = 400, 6, 4, 2                # the story: 2 frames a second, 24 tiles a sheet, 400 px tiles
 K, MOVE_COLS, MOVE_ROWS, MOVE_W = 5, 8, 8, 320   # the motion: K stretches of one second, every frame, 8 x 8 tiles of 320 px
 K_ALONE = 10                                     # the fault-finder reads ours with ten stretches
 LETTERS = "ABCD"                                 # a line-up holds ours and up to three --against films
 NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 PY = sys.executable
-READS = Path(os.environ.get("VD_READS") or Path.home() / ".vd" / "reads")   # the neutral root reader packs go under
+READS = Path(os.environ.get("VD_READS") or lean.vd_home() / "reads")   # the neutral root reader packs go under
 
 
 def trim_words(first, last):
     """" (only its first N s and last M s)" for the ends that were given, "" for none: either alone is allowed."""
     ends = [f"first {first:g} s" if first else "", f"last {last:g} s" if last else ""]
     return f" (only its {' and '.join(e for e in ends if e)})" if first or last else ""
-
-
-def duration(film):
-    p = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(film)], capture_output=True, text=True, creationflags=NO_WINDOW)
-    try:
-        return float(p.stdout.strip())
-    except ValueError:
-        raise SystemExit(f"{film}: ffprobe could not read its length")
 
 
 def tile_h(film):
@@ -69,9 +63,10 @@ def tile_h(film):
 
 BATCH = 48   # story tiles picked per ffmpeg call: ffmpeg's expression parser refuses a select of about 100 terms
              # (120 failed on a 110 s film), and one command for a whole long film was too long for Windows
+_UNSET = object()
 
 
-def tiles(film, start=0.0, length=None, h=None):
+def tiles(film, start=0.0, length=None, h=None, times=_UNSET):
     """(time, picture) at FPS a second from `start`, for `length` seconds (all when None), each the frame on screen at its
     time: the last frame whose own time is at or before it, read from the file's packets. ffmpeg's fps filter picked
     by its own rounding: half a second late centred on each tick (the tile labelled 31.00 s showed 31.167), and with
@@ -79,9 +74,17 @@ def tiles(film, start=0.0, length=None, h=None):
     twice where 540 was on screen; a review's finding). The seek lands on the first frame wanted, as seek_to's do."""
     import numpy as np
     from PIL import Image
-    from film_diff import clock, ffprobe
+    from film_diff import ffprobe, fps_of, packet_clock, seek_frame, shown_index
     h = h or tile_h(film)
-    times = clock(film)
+    # a seek lands only by the file's own packet times, with none before 0: with none (a raw H.264 stream) or with
+    # preroll, frames are picked by number from a decode from the start (film_diff.packet_clock)
+    seekable = times is not None and (times is _UNSET or bool(times[0] >= 0))
+    if times is _UNSET:
+        times, seekable = packet_clock(film)
+    elif times is None:
+        raw = ffprobe(film)
+        fps = fps_of(raw)
+        times = np.arange(int(raw["duration"] * fps) + 2) / fps
     end = ffprobe(film)["duration"] if length is None else min(start + length, ffprobe(film)["duration"])
     ticks = [start + k / FPS for k in range(int((end - start) * FPS) + 2) if start + k / FPS < end - 1e-9]
     if not ticks:
@@ -92,14 +95,18 @@ def tiles(film, start=0.0, length=None, h=None):
     # a film over about 21 minutes (a council's finding)
     for b in range(0, len(frames), BATCH):
         part = frames[b:b + BATCH]
-        first = part[0]
-        ss = 0.0 if first == 0 else float(times[first - 1] + times[first]) / 2      # half way back: the seek lands on `first`
-        pick = "+".join(f"eq(n\\,{f - first})" for f in part)
-        cmd = ["ffmpeg", "-v", "error", "-ss", f"{ss:.6f}", "-i", str(film), "-vf", f"select='{pick}',scale={W}:{h}", "-fps_mode", "passthrough",
-               "-frames:v", str(len(part)), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+        if seekable:
+            seek, nums = ["-ss", f"{seek_frame(times, part[0]):.6f}"], [f - part[0] for f in part]   # half way back: lands on part[0]
+        else:
+            seek, nums = [], [shown_index(times, f) for f in part]                  # each packet's picture in a decode from the start
+        shown = sorted(set(nums))
+        pick = "+".join(f"eq(n\\,{d})" for d in shown)
+        cmd = ["ffmpeg", "-v", "error", *seek, "-i", str(film), "-vf", f"select='{pick}',scale={W}:{h}", "-fps_mode", "passthrough",
+               "-frames:v", str(len(shown)), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
         raw = subprocess.run(cmd, capture_output=True, check=True, creationflags=NO_WINDOW).stdout
-        got.update({f: Image.frombytes("RGB", (W, h), raw[k * W * h * 3:(k + 1) * W * h * 3]) for k, f in enumerate(part)
-                    if (k + 1) * W * h * 3 <= len(raw)})
+        size = W * h * 3
+        pics = {d: Image.frombytes("RGB", (W, h), raw[k * size:(k + 1) * size]) for k, d in enumerate(shown) if (k + 1) * size <= len(raw)}
+        got.update({f: pics[d] for f, d in zip(part, nums) if d in pics})
     return [(t, got[f]) for t, f in zip(ticks, want) if f in got]
 
 
@@ -109,20 +116,10 @@ STRIP = 24   # px: the band above each story tile that holds its time, so no sta
 def sheets(items, out):
     """Write story-01.jpg ... from (time, picture) tiles, the time in a band above every tile (the stamp on the tile's
     corner covered a film's act lines there, and two readers could not check them). Returns how many sheets."""
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageDraw
+    from sheet import strip_font
     out.mkdir(parents=True, exist_ok=True)
-    font = None
-    for face in ("arialbd.ttf", "Arial Bold.ttf", "DejaVuSans-Bold.ttf"):
-        try:
-            font = ImageFont.truetype(face, 17)
-            break
-        except OSError:
-            pass
-    if font is None:
-        try:
-            font = ImageFont.load_default(17)
-        except TypeError:
-            font = ImageFont.load_default()
+    font = strip_font(17)
     per = COLS * ROWS
     w, h = items[0][1].size if items else (W, 225)
     for s in range(0, len(items), per):
@@ -141,43 +138,95 @@ def spans_of(film, first=None, last=None):
     """The stretches of the film a reader is shown: None for all of it, else its first N and last M seconds."""
     if first is None and last is None:
         return None
-    dur = duration(film)
+    from film_diff import ffprobe
+    dur = ffprobe(film)["duration"]
     out = [(0.0, first)] if first else []
     if last:
         out.append((max(first or 0.0, dur - last), dur))
     return out
 
 
-def film_tiles(film, first=None, last=None):
+def film_tiles(film, first=None, last=None, times=_UNSET):
     spans = spans_of(film, first, last)
     if spans is None:
-        return tiles(film)
+        return tiles(film, times=times)
+    if times is _UNSET:
+        from film_diff import frame_times
+        times = frame_times(film)
     h = tile_h(film)
-    return [t for a, b in spans for t in tiles(film, a, b - a, h)]
+    return [t for a, b in spans for t in tiles(film, a, b - a, h, times=times)]
 
 
-def moves(film, out, k=K, spans=None):
+def draw_moves(film, starts, out, prefix="move", times=_UNSET):
+    """Draw each 1 s stretch in `starts` as `{prefix}-1.jpg ...` in `out`, in-process with shared frame_times."""
+    import sheet
+    from film_diff import frame_times
+    out.mkdir(parents=True, exist_ok=True)
+    if not starts:
+        return
+    probed = sheet.probe(str(film))
+    dur = probed[3]                                    # the length sheet.py checks --to against
+    if times is _UNSET:
+        times = frame_times(film)
+    for n, t in enumerate(starts, 1):
+        try:
+            sheet.native_stretch(film, out / f"{prefix}-{n}.jpg", float(f"{t:.4f}"), float(f"{min(t + 1.0, dur):.4f}"),
+                                 cols=MOVE_COLS, rows=MOVE_ROWS, width=MOVE_W, probed=probed, times=times)
+        except SystemExit as e:
+            why = f"exit {e.code}" if isinstance(e.code, int) else str(e or "").strip()
+            raise SystemExit(f"sheet.py could not draw the stretch from {t:.2f} s: {why[-300:]}") from None
+
+
+def moves(film, out, k=K, spans=None, times=_UNSET):
     """move-1.jpg ... in time order: every frame of each of the k stretches with the most change (scan.windows), drawn by
     sheet.py --native. Returns the stretches' start times."""
     import scan
-    from film_diff import ffprobe
     fps = scan.rate(film)
-    dur = ffprobe(film)["duration"]                    # the length sheet.py checks --to against
     starts = scan.windows(film, fps, k, spans=spans)
     out.mkdir(parents=True, exist_ok=True)
-    for n, t in enumerate(starts, 1):
-        p = subprocess.run([PY, "-X", "utf8", str(TOOLS / "sheet.py"), str(film), "-o", str(out / f"move-{n}.jpg"), "--native", "--from", f"{t:.4f}",
-                            "--to", f"{min(t + 1.0, dur):.4f}", "--cols", str(MOVE_COLS), "--rows", str(MOVE_ROWS), "--width", str(MOVE_W)],
-                           capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
-        if p.returncode:
-            raise SystemExit(f"sheet.py could not draw the stretch from {t:.2f} s: {(p.stdout + p.stderr).strip()[-300:]}")
+    draw_moves(film, starts, out, times=times)
     return starts
 
 
-def reader_material(film, out, k=K, first=None, last=None):
+def reader_material(film, out, k=K, first=None, last=None, times=_UNSET):
     """What a reader is given of one film, into `out`: its story sheets and its motion sheets. (story sheets, stretch starts)."""
-    n = sheets(film_tiles(film, first, last), out)
-    return n, moves(film, out, k, spans_of(film, first, last))
+    if times is _UNSET:
+        from film_diff import frame_times
+        times = frame_times(film)
+    n = sheets(film_tiles(film, first, last, times=times), out)
+    return n, moves(film, out, k, spans_of(film, first, last), times=times)
+
+
+def ours_material(film, alone, lineup_ours, k, k_alone, times=_UNSET):
+    """Build our film's story and motion sheets once for both lineup/ and alone/: each keeps its own stretch count from one
+    ranked scan, and the union of stretches is rendered once and copied under each folder's move-1..N numbering."""
+    import scan
+    if times is _UNSET:
+        from film_diff import frame_times
+        times = frame_times(film)
+    if lineup_ours is None:
+        n, alone_at = reader_material(film, alone, k_alone, times=times)
+        return n, [], alone_at
+    n = sheets(film_tiles(film, times=times), alone)
+    lineup_ours.mkdir(parents=True, exist_ok=True)
+    for f in sorted(alone.glob("story-*.jpg")):
+        shutil.copy2(f, lineup_ours / f.name)
+    fps = scan.rate(film)
+    ranked = scan.windows(film, fps, max(0, k, k_alone), ranked=True)
+    ours_at = sorted(ranked[:max(0, k)])
+    alone_at = sorted(ranked[:max(0, k_alone)])
+    union = sorted(set(ours_at) | set(alone_at))
+    if union:
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = Path(tmp)
+            draw_moves(film, union, stage, prefix="u", times=times)
+            by_time = {t: idx for idx, t in enumerate(union, 1)}
+            for folder, chosen in ((lineup_ours, ours_at), (alone, alone_at)):
+                for m, t in enumerate(chosen, 1):
+                    tag = f"u-{by_time[t]}"
+                    for src in sorted(p for p in stage.glob("u-*.jpg") if p.stem == tag or p.stem.startswith(tag + "_")):
+                        shutil.copy2(src, folder / f"move-{m}{src.name[len(tag):]}")
+    return n, ours_at, alone_at
 
 
 def file_hash(path):
@@ -193,7 +242,7 @@ SHEETS = 2   # bump when the sheets change, so a set cached the old way is made 
 
 def sheets_root(ref, cache_root=None):
     """Where a reference's sheets are cached: beside its measures, under this version of the sheets."""
-    return Path(cache_root or Path.home() / ".vd" / "measures") / f"{file_hash(ref)}-sheets{SHEETS}"
+    return Path(cache_root or lean.vd_home() / "measures") / f"{file_hash(ref)}-sheets{SHEETS}"
 
 
 def ref_sheets(ref, first=None, last=None, cache_root=None, k=K):
@@ -217,9 +266,44 @@ def keys(film, times, out, name="key-{i}-{t:.2f}s.png", widest=None):
     its comment, so a key named key-N.jpg still says when it is."""
     out.mkdir(parents=True, exist_ok=True)
     made = []
-    for i, t in enumerate(times, 1):
-        f = out / name.format(i=i, t=t)
-        scale = ["-vf", f"scale='min({widest},iw)':-2"] if widest else []
+    scale = ["-vf", f"scale='min({widest},iw)':-2"] if widest else []
+    targets = [(t, out / name.format(i=i, t=t)) for i, t in enumerate(times, 1)]
+    # every key from one ffmpeg: one input a key, each with its own -ss (so each is the frame its own call gave), each
+    # mapped to its own PNG; a .jpg key is made from its PNG as before. A key that call did not write is made alone.
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        drawn = {}
+        for b in range(0, len(targets), KEYS_AT_ONCE):
+            part = targets[b:b + KEYS_AT_ONCE]
+            cmd = ["ffmpeg", "-v", "error", "-y"]
+            for t, _ in part:
+                cmd += ["-ss", f"{t:.3f}", "-i", str(film)]
+            for k, (t, f) in enumerate(part):
+                png = f if f.suffix.lower() != ".jpg" else Path(tmp) / f"{b + k}.png"
+                png.unlink(missing_ok=True)   # so a key left by an earlier pack can't pass for one this call wrote
+                cmd += ["-map", f"{k}:v:0", "-frames:v", "1", *scale, str(png)]
+                drawn[f] = png
+            subprocess.run(cmd, capture_output=True, creationflags=NO_WINDOW)
+        for t, f in targets:
+            png = drawn[f]
+            if png.is_file() and png.stat().st_size:
+                if f.suffix.lower() == ".jpg":
+                    from PIL import Image
+                    with Image.open(png) as im:
+                        im.convert("RGB").save(f, quality=92, comment=f"{t:.2f} s".encode())
+                made.append(f)
+            else:
+                made += keys_one_by_one(film, [(t, f)], scale)
+    return made
+
+
+KEYS_AT_ONCE = 24   # inputs to one ffmpeg: each is a decoder held open, and the command line stays short
+
+
+def keys_one_by_one(film, targets, scale):
+    """The old way, one ffmpeg a key: for a key the shared call did not write, so it fails or is made as it always was."""
+    made = []
+    for t, f in targets:
         if f.suffix.lower() == ".jpg":
             from io import BytesIO
             from PIL import Image
@@ -261,6 +345,20 @@ def rest_times(film, n=6):
         frame = (best[0] + best[1]) // 2 if best else a + int(np.argmin(d[a:b])) + 1
         out.append(round(frame / fps, 3))
     return out
+
+
+def ref_keys(ref, cache_root=None, n=6, widest=1920):
+    """The reference's rest keys (rest_keys), made once and kept beside its sheets: each vd pin of the same film read
+    its changes again and drew its keys again. Made in a folder of its own and moved into place whole (as ref_sheets),
+    under the sheets' version (SHEETS), which a change to how keys are chosen or drawn bumps."""
+    folder = sheets_root(ref, cache_root) / f"keys-n{n}-w{widest}"
+    if not folder.is_dir():
+        part = folder.with_name(folder.name + ".part")
+        shutil.rmtree(part, ignore_errors=True)
+        rest_keys(ref, part, n, widest)
+        shutil.rmtree(folder, ignore_errors=True)
+        part.replace(folder)
+    return folder
 
 
 def rest_keys(film, out, n=6, widest=1920):
@@ -333,12 +431,14 @@ def make(film, against, out_root, ref_first=None, ref_last=None, key_times=None,
         pack = reads_root / secrets.token_hex(6)
     alone = pack / "alone"
     said = [f"pack-{n_pack}"]
+    from film_diff import ffprobe, frame_times
+    ours_times = frame_times(film)   # shared across lineup/, alone/ and every motion sheet of ours
     letters = {}
+    dealt = deal(n_pack, 1 + len(against), ours_before(out_root, n_pack)) if against else []
+    lineup = pack / "lineup"
+    n_alone, ours_at, alone_at = ours_material(film, alone, (lineup / dealt[0]) if against else None, k, k_alone, times=ours_times)
     if against:
-        dealt = deal(n_pack, 1 + len(against), ours_before(out_root, n_pack))
-        lineup = pack / "lineup"
-        n, ours_at = reader_material(film, lineup / dealt[0], k)
-        letters[dealt[0]] = (film, "ours", n, ours_at)
+        letters[dealt[0]] = (film, "ours", n_alone, ours_at)
         for i, ref in enumerate(against, 1):
             src = ref_sheets(ref, ref_first, ref_last, cache_root, k)
             (lineup / dealt[i]).mkdir(parents=True)
@@ -346,9 +446,8 @@ def make(film, against, out_root, ref_first=None, ref_last=None, key_times=None,
                 shutil.copy2(f, lineup / dealt[i] / f.name)
             letters[dealt[i]] = (ref, f"--against {i}" + trim_words(ref_first, ref_last),
                                  len(list(src.glob("story-*.jpg"))), stretch_times(src, ref, k, ref_first, ref_last))
-    n_alone, alone_at = reader_material(film, alone, k_alone)
     if not key_times:
-        dur = duration(film)
+        dur = ffprobe(film)["duration"]
         key_times = [round(dur * (i + 0.5) / 5, 2) for i in range(5)]
     keys(film, key_times, alone)
     key = out_root / f"pack-{n_pack}-KEY.txt"
@@ -394,7 +493,7 @@ def main(argv=None):
     ap.add_argument("--out", help="where the key, pack-N-KEY.txt, goes (default ~/.vd/out/<film's stem>)")
     ap.add_argument("--reads", help=f"the neutral root the pack goes under (default {READS})")
     a = ap.parse_args(argv)
-    out = Path(a.out) if a.out else Path.home() / ".vd" / "out" / Path(a.film).stem
+    out = Path(a.out) if a.out else Path(os.environ.get("VD_OUT") or lean.vd_home() / "out") / Path(a.film).stem
     make(a.film, a.against or [], out, a.ref_first, a.ref_last, [float(t) for t in a.keys.split(",")] if a.keys else None, k=a.k, k_alone=a.k_alone, reads_root=a.reads)
 
 

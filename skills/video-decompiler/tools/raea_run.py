@@ -76,6 +76,30 @@ def binary_version(path):
 EXE = "raea.exe" if os.name == "nt" else "raea"
 
 
+def exes_under(place, most=5):
+    """Every raea under `place` at most `most` parts down, in name order. A walk that stops at that depth, where rglob
+    went through every folder under ~/.raea (its npm store and shared files) and then threw the deep ones away."""
+    found, stack = [], [(place, 1)]
+    while stack:
+        folder, depth = stack.pop()
+        try:
+            with os.scandir(folder) as it:
+                entries = sorted(it, key=lambda e: e.name)
+        except OSError:
+            continue
+        deeper = []
+        for e in entries:
+            try:
+                if os.path.normcase(e.name) == os.path.normcase(EXE) and e.is_file():
+                    found.append(Path(e.path))
+                elif depth < most and e.is_dir(follow_symlinks=False):
+                    deeper.append((Path(e.path), depth + 1))
+            except OSError:   # a link that loops, an entry this user may not read: no raea, as Path.is_file() said
+                continue
+        stack += reversed(deeper)
+    return found
+
+
 def candidates():
     """Every raea this machine has where a skill would look, in order: beside the skill, under ~/.raea, on PATH, and
     where this machine keeps builds (KNOWN). Returns (paths that exist, places looked)."""
@@ -87,7 +111,7 @@ def candidates():
         if place.is_file():
             found.append(place)
         elif place.is_dir():
-            found += [f for f in place.rglob(EXE) if f.is_file() and len(f.relative_to(place).parts) <= 5]
+            found += exes_under(place)
     on_path = shutil.which("raea")
     looked.append("PATH")
     if on_path:
@@ -303,9 +327,12 @@ def _render(entry, out, extra, timeout, idle, retries, trace, bump_full):
             # seconds is a stall.
             t0, marks, why = time.monotonic(), [], None               # marks: (time, CPU seconds so far), one a second
             while proc.poll() is None:
-                time.sleep(1.0)
-                if proc.poll() is not None:
-                    break  # it finished while we slept, so it neither stalled nor ran over
+                # wait, not sleep: a sleep held the machine for the rest of its second after raea had already finished
+                try:
+                    proc.wait(timeout=1.0)
+                    break  # it finished while we waited, so it neither stalled nor ran over
+                except subprocess.TimeoutExpired:
+                    pass
                 c, now = cpu_seconds(proc), time.monotonic()
                 if c is not None:
                     marks.append((now, c))
@@ -551,6 +578,20 @@ def lock_busy(lock):
             return False                     # free: closing the file lets it go again
     except OSError:
         return True
+
+
+def queue_free(lock=None):
+    """Whether a look would take its turn at once: nothing holds the lock it would wait on (its ancestor's own, when an
+    ancestor holds the machine's) and no other look waits for it. The queue off (RAEA_RUN_ALONE=0) is always free."""
+    if os.environ.get("RAEA_RUN_ALONE") == "0":
+        return True
+    if lock is None:
+        QUEUE.mkdir(exist_ok=True)
+        lock = QUEUE / "raea_run.lock"
+    above = held_above(lock)
+    if above is not None:
+        lock = Path(lock).with_name(f"{Path(lock).name}.under.{above}")
+    return not lock_busy(lock) and not waiting_pids(lock, ".looks")
 
 
 def held_above(lock):

@@ -88,6 +88,27 @@ def main():
         said = subprocess.run([sys.executable, "-X", "utf8", str(TOOLS / "space.py"), str(page)], capture_output=True, text=True, encoding="utf-8").stdout
         assert "(a page)" in said and "(a scene)" in said and "%" in said, f"run by hand it says both shares in words: {said}"
 
+        # Cb4: a rotated portrait clip (stored 640x360 with -display_rotation 90) is read at its shown 360x640 shape, not squashed
+        import cv2
+        far, _ = speckle(1, 1400, 9, 70, 140)
+        sheet_img = (far + 16).astype(np.float32)
+        up_frames, rot_frames = [], []
+        for k in range(60):
+            m = cv2.getRotationMatrix2D((960, 540), 0.8 * k, 1.0)
+            m[0, 2] -= 780
+            m[1, 2] -= 220
+            up = np.clip(cv2.warpAffine(sheet_img, m, (H, W), flags=cv2.INTER_LINEAR), 0, 255).astype(np.uint8)
+            up_frames.append(up)
+            rot_frames.append(np.rot90(up, -1))
+        upright, stored, rotated = d / "upright.mp4", d / "stored_rot.mp4", d / "rotated_meta.mp4"
+        subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "gray", "-s", f"{H}x{W}", "-r", "30", "-i", "-",
+                        "-c:v", "libx264", "-crf", "10", "-pix_fmt", "yuv420p", str(upright)], input=np.stack(up_frames).tobytes(), check=True)
+        subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "gray", "-s", f"{W}x{H}", "-r", "30", "-i", "-",
+                        "-c:v", "libx264", "-crf", "10", "-pix_fmt", "yuv420p", str(stored)], input=np.stack(rot_frames).tobytes(), check=True)
+        subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-display_rotation", "90", "-i", str(stored), "-c", "copy", str(rotated)], check=True)
+        up_read, rot_read = space.read(upright), space.read(rotated)
+        assert up_read["sheet_move"] > 0.8 and up_read["scene_move"] < 0.05 and rot_read == up_read, f"rotated sheet reads like upright: up={up_read} rot={rot_read}"
+
         # the row a film of its own gets against the video it learned from: one way only
         import measure
         assert measure.VERSION >= 5, "a measurement made before the summary said how a film moves is measured again"

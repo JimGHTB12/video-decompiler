@@ -174,6 +174,25 @@ def test_foley_mix_reports_the_level_it_wrote():
         assert float(lufs) < -16 and "-15 LUFS)" not in said.getvalue(), (lufs, said.getvalue())
 
 
+def test_foley_mix_meters_again_only_what_it_rewrote():
+    # was: the mix was metered twice when it was already level and written as metered; a re-levelled mix, or one whose
+    # level could not be read, is still metered as written
+    from unittest.mock import patch
+    rng = np.random.default_rng(5)
+    with tempfile.TemporaryDirectory() as tmp:
+        sound = Path(tmp) / "sound.wav"
+        for said, meterings in (((-15.05, -6.0), 1), ((-21.0, -6.0), 2), ((None, None), 2)):
+            lean.write_wav(sound, (rng.standard_normal((48000, 2)) * 0.1).astype(np.float32))
+            heard = []
+            with patch.object(lean, "loudness", lambda p: heard.append(Path(p).name) or said):
+                got = foley.blend_into_sound_wav(sound, np.zeros((48000, 2), np.float32))
+            assert len(heard) == meterings and got == said, (said, heard, got)
+    # the two whoosh bands from one FFT are the two band() calls, to the bit
+    noise = rng.standard_normal(48000).astype(np.float32)
+    pair = foley.bands(noise, [(240.0, 1400.0), (1400.0, 5600.0)])
+    assert np.array_equal(pair[0], foley.band(noise, 240.0, 1400.0)) and np.array_equal(pair[1], foley.band(noise, 1400.0, 5600.0))
+
+
 def test_foley_synthesizes_physical_sound_from_telemetry():
     # Spectral centroid helper
     def centroid_hz(sig):
@@ -251,10 +270,37 @@ def test_borrow_compiles_motion_dna_cartridge():
         # a cached measure made by another measure.py is measured again, not trusted
         import hashlib
         import measure
-        m_dir = Path.home() / ".vd" / "measures" / ("borrow-" + hashlib.sha1(ref_mp4.read_bytes()).hexdigest()[:12])
+        m_dir = lean.vd_home() / "measures" / ("borrow-" + hashlib.sha1(ref_mp4.read_bytes()).hexdigest()[:12])
         (m_dir / "measure.json").write_text(json.dumps({"version": 0}), encoding="utf-8")
         assert lean.main(["borrow", str(ref_mp4), "-o", str(out_film), "--k", "2"]) == 0, "in a film folder no --like is needed"
         assert json.loads((m_dir / "measure.json").read_text(encoding="utf-8"))["version"] == measure.VERSION
+        # D2: a film vd pin measured (its measures folder holds vd/measure.json, this measure.py's) is read from there,
+        # not measured again, and its dna is the same; an older one there is not trusted
+        made = {n: (out_film / n).read_bytes() for n in ("dna.json", "kit/dna.gen.ts")}
+        pinned = lean.vd_home() / "measures" / (hashlib.sha1(ref_mp4.read_bytes()).hexdigest()[:16] + "-novoice") / "vd"
+        pinned.mkdir(parents=True, exist_ok=True)
+        (pinned / "measure.json").write_bytes((m_dir / "measure.json").read_bytes())
+        import shutil
+        shutil.rmtree(m_dir)
+        from unittest.mock import patch
+        with patch.object(measure, "measure", lambda *a, **k: (_ for _ in ()).throw(AssertionError("measured again"))):
+            assert lean.main(["borrow", str(ref_mp4), "-o", str(out_film), "--k", "2"]) == 0
+        assert {n: (out_film / n).read_bytes() for n in made} == made and not m_dir.exists()
+        (pinned / "measure.json").write_text(json.dumps({"version": 0}), encoding="utf-8")
+        assert lean.main(["borrow", str(ref_mp4), "-o", str(out_film), "--k", "2"]) == 0
+        assert json.loads((m_dir / "measure.json").read_text(encoding="utf-8"))["version"] == measure.VERSION, "an older pin measure is measured again"
+        # D4: the film's colours are kept beside its measures: borrowing again reads them back (the same dna), and a
+        # new reading of colours (COLOURS_VERSION) reads the film again
+        import borrow
+        made = {n: (out_film / n).read_bytes() for n in ("dna.json", "kit/dna.gen.ts")}
+        with patch.object(borrow, "film_colours", lambda *a, **k: (_ for _ in ()).throw(AssertionError("read its colours again"))):
+            assert lean.main(["borrow", str(ref_mp4), "-o", str(out_film), "--k", "2"]) == 0
+        assert {n: (out_film / n).read_bytes() for n in made} == made
+        read = []
+        real = borrow.film_colours
+        with patch.object(borrow, "COLOURS_VERSION", borrow.COLOURS_VERSION + 1), patch.object(borrow, "film_colours", lambda *a, **k: read.append(1) or real(*a, **k)):
+            assert lean.main(["borrow", str(ref_mp4), "-o", str(out_film), "--k", "2"]) == 0
+        assert read == [1] and {n: (out_film / n).read_bytes() for n in made} == made
         ts_text = dna_ts.read_text(encoding="utf-8")
         assert "export const DNA_SPRING =" in ts_text and "export const DNA_PALETTE =" in ts_text
         pin_dir = lean.outdir(out_film) / "pin"
@@ -363,6 +409,33 @@ def test_evolve_packs_four_blind_world_candidates_and_selects_winner():
                 winner_meta = json.loads((lean.outdir(target) / "EVOLVE-WINNER.json").read_text(encoding="utf-8"))
                 assert not (target / "EVOLVE-WINNER.json").exists(), "bookkeeping stays out of the film folder"
                 assert winner_meta["letter"] == "B"
+                plus_dir, _, _, _ = evolve.build_tournament(
+                    name=str(Path(tmp) / "plus+"), render=False, reads_root=Path(tmp) / "reads", seed=1
+                )
+                for ltr in ("A", "B", "C", "D"):
+                    assert "plus+" not in (plus_dir / ltr / "BOARD-BLIND.md").read_text(encoding="utf-8").lower(), (
+                        f"blind board {ltr} leaked non-word-ending folder name plus+"
+                    )
+                # Db2+Db3: --seed uses an O(1) RNG sample (not pack.deal), CLI prints the real tournament folder, and --against needs --select
+                import os
+                import subprocess
+                import time as _time
+                t0 = _time.monotonic()
+                _, _, _, map0 = evolve.build_tournament(name=str(Path(tmp) / "seed0"), render=False, reads_root=Path(tmp) / "reads", seed=0)
+                order0 = [map0[k]["archetype"] for k in ("A", "B", "C", "D")]
+                assert order0 != ["plusone", "stet", "onoma", "linden"], order0
+                _, _, _, map_big = evolve.build_tournament(name=str(Path(tmp) / "seedbig"), render=False, reads_root=Path(tmp) / "reads", seed=20261118)
+                order_big = [map_big[k]["archetype"] for k in ("A", "B", "C", "D")]
+                assert _time.monotonic() - t0 < 15.0 and order0 != order_big, (order0, order_big)
+                env_evo = {**os.environ, "VD_OUT": str(Path(fake_out)), "VD_READS": str(Path(tmp) / "reads")}
+                p_bad = subprocess.run([sys.executable, "-X", "utf8", str(TOOLS / "evolve.py"), str(Path(tmp) / "cli-film"),
+                                        "--against", str(ROOT / "docs" / "media" / "stet.mp4")], capture_output=True, text=True, env=env_evo)
+                assert p_bad.returncode != 0 and "--select" in (p_bad.stdout + p_bad.stderr), (p_bad.returncode, p_bad.stdout, p_bad.stderr)
+                p_ok = subprocess.run([sys.executable, "-X", "utf8", str(TOOLS / "evolve.py"), str(Path(tmp) / "cli-film"), "--seed", "1"],
+                                      capture_output=True, text=True, env=env_evo)
+                assert p_ok.returncode == 0 and str(Path(tmp) / "cli-film" / "candidates") not in p_ok.stdout, p_ok.stdout
+                shown_cands = Path(next(l for l in p_ok.stdout.splitlines() if l.startswith("spawned 4 orthogonal")).split(" in ", 1)[1].strip())
+                assert shown_cands.is_dir(), p_ok.stdout
             finally:
                 lean.OUTROOT = old_outroot
 
@@ -404,6 +477,33 @@ def test_playable_exports_interactive_runtime_twin():
                 assert (out_play2 / "media" / "sound.wav").read_bytes() == built.read_bytes(), "the current mix"
         finally:
             built.unlink(missing_ok=True)
+
+
+def test_playable_bundles_media_code_and_refreshes_changed_media():
+    # the bundler's copy of the film keeps from media/ only what can be imported, and a rebuild skips media it has
+    # already copied unchanged: an import from media/ still bundles, and a file changed at the same size still arrives
+    import os
+    if playable.find_esbuild() is None and playable.find_bun() is None:
+        print("skipped: neither esbuild nor bun is installed")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp) / "stet"
+        lean.main(["new", str(d), "--like", "stet"])
+        (d / "media" / "words.json").write_text('{"word": "imported-from-media"}', encoding="utf-8")
+        entry = lean.entry_of(d)
+        entry.write_text('import WORDS from "./media/words.json";\nconsole.warn(WORDS.word);\n' + entry.read_text(encoding="utf-8"),
+                         encoding="utf-8")
+        art = d / "media" / "plate.bin"
+        art.write_bytes(b"A" * 4096)
+        out_play = Path(tmp) / "play"
+        assert lean.main(["playable", "--film", str(d), "-o", str(out_play)]) == 0
+        assert "imported-from-media" in (out_play / "bundle.js").read_text(encoding="utf-8")
+        assert (out_play / "media" / "plate.bin").read_bytes() == art.read_bytes()
+        art.write_bytes(b"B" * 4096)
+        os.utime(art, ns=(art.stat().st_atime_ns, art.stat().st_mtime_ns + 10 ** 9))
+        assert lean.main(["playable", "--film", str(d), "-o", str(out_play)]) == 0
+        assert (out_play / "media" / "plate.bin").read_bytes() == b"B" * 4096, "a changed media file reaches the page"
+
 
 
 def test_playable_fits_any_window_and_plays_the_films_whole_mix():

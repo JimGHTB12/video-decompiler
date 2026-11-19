@@ -406,6 +406,30 @@ def test_one_output_name_and_a_sheet_outside_a_film():
             lean.OUTROOT = old_out
         assert r == 0 and (Path(tmp) / "take-sheet.png").is_file(), r
         assert not (Path(tmp) / "out" / "loose").exists(), "an output folder was made for a folder that is no film"
+        # Eb1: standalone listen.py sheet accepts documented --cues cues.json and draws the cues
+        cues_json = Path(tmp) / "cues.json"
+        cues_json.write_text(json.dumps({"version": "v2", "events": [{"id": "hit", "t": 1.5}]}), encoding="utf-8")
+        cues_png = Path(tmp) / "cues-sheet.png"
+        p_cues = subprocess.run([sys.executable, "-X", "utf8", str(TOOLS / "listen.py"), "sheet", str(take), "--out", str(cues_png), "--cues", str(cues_json)],
+                                capture_output=True, text=True)
+        assert p_cues.returncode == 0 and cues_png.is_file() and cues_png.read_bytes() != (Path(tmp) / "take-sheet.png").read_bytes(), (
+            p_cues.returncode, p_cues.stdout, p_cues.stderr
+        )
+
+
+
+def test_a_sound_sheet_decodes_the_track_once():
+    # was: vd audio decoded the track at 48 kHz three times, for the measures, the sheet and the sheet's transcript
+    import listen
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as tmp:
+        take = Path(tmp) / "take.wav"
+        voice_like(take)
+        rates, real = [], listen.decode_audio
+        with patch.object(listen, "decode_audio", lambda path, rate=listen.RATE, *a, **k: rates.append(rate) or real(path, rate, *a, **k)):
+            r, _ = quiet(lean.main, ["audio", str(take), "--sheet", "-o", str(Path(tmp) / "s.png")])
+        assert r == 0 and (Path(tmp) / "s.png").is_file(), r
+        assert rates.count(listen.RATE) == 1, rates
 
 
 
@@ -441,10 +465,56 @@ def test_an_ambiguous_tempo_takes_the_octave_nearest_the_film():
         clicks(track, 100.0, seconds=30.0)
         read = {"bpm": 200.0, "offset_s": 0.25, "drops": [], "grid_strength": 0.6, "flags": ["alternative tempo within 10%: ambiguous"],
                 "residual_ms": {"median": 1.0, "p90": 2.0}, "duration_s": 30.0}
-        with patch.object(tempo_map, "analyse_file", lambda *a, **k: (read, 1)):
+        real_run = tempo_map.subprocess.run
+        fit_calls = []
+        with patch.object(tempo_map, "analyse_file", lambda *a, **k: (read, 1)), \
+                patch.object(tempo_map.subprocess, "run", side_effect=lambda cmd, *a, **kw: (
+                    fit_calls.append((list(cmd), kw.get("creationflags"))), real_run(cmd, *a, **kw))[1]):
             r, out = quiet(lean.main, ["audio", str(track), "--tempo-map", "--film", str(film)])
+        assert fit_calls and "-nostdin" in fit_calls[0][0] and fit_calls[0][1] == tempo_map.NO_WINDOW, fit_calls
         m = lean.score_of(film)["music"]
         assert r == 0 and m["fb"] == 36 and m["octave"] and "100.00" in m["octave"], (r, m)
+
+
+def test_the_beat_grid_scores_and_attacks_are_the_old_numbers():
+    # E1: the smoothing adds slices of a wrapped histogram in np.roll's order, beats are counted with np.unique, and the
+    # frames are a strided view; each must give the old numbers bit for bit, here on random onsets, on a click track
+    # whose attacks tie on the grid, and on a tempo whose period is just over the histogram's 32 bins
+    import math
+
+    def old_grid(times, weights, duration, bpm, width=0.010):
+        period = 60.0 / bpm
+        bins = max(32, int(round(period * 1000)))
+        phases = np.mod(times, period) / period * bins
+        hist = np.bincount(np.floor(phases).astype(int) % bins, weights=weights, minlength=bins)
+        radius = max(1, int(width * 1000))
+        smoothed = sum(np.roll(hist, k) * math.exp(-0.5 * (k / (radius / 2)) ** 2) for k in range(-radius, radius + 1))
+        phase = (int(np.argmax(smoothed)) + 0.5) / bins * period
+        distance = np.abs((times - phase + period / 2) % period - period / 2)
+        near = distance < width * 2
+        if not near.any():
+            return 0.0, phase
+        response = np.exp(-0.5 * (distance / width) ** 2)
+        recall = float(np.sum(weights * response) / max(weights.sum(), 1e-10))
+        indices = np.round((times[near] - phase) / period).astype(int)
+        strongest = {}
+        for i, w in zip(indices, weights[near] * response[near]):
+            strongest[i] = max(strongest.get(i, 0.0), float(w))
+        return math.sqrt(max(0.0, recall * min(1.0, len(strongest) / max(1, int(duration / period))))), phase
+    rng = np.random.default_rng(12)
+    cases = [(np.sort(rng.uniform(0, 30, 120)), rng.uniform(0.1, 2, 120), 30.0)]
+    clicks = np.arange(0, 20, 0.5)
+    cases.append((np.sort(np.r_[clicks, clicks + 0.25]), np.ones(2 * len(clicks)), 20.0))   # two equal attacks a beat apart
+    for times, weights, duration in cases:
+        for bpm in (60.0, 87.3, 120.0, 150.0, 199.9, 1875.0):
+            assert tempo_map.grid_score(times, weights, duration, bpm) == old_grid(times, weights, duration, bpm), bpm
+    x = (rng.standard_normal(16000 * 3) * 0.1).astype(np.float32)
+    x[::4000] += 0.9
+    t, w, k, env = tempo_map.attacks(x)
+    padded = np.pad(x, (tempo_map.FRAME // 2, tempo_map.FRAME // 2))
+    n = len(x) // tempo_map.HOP
+    frames = padded[(np.arange(n) * tempo_map.HOP)[:, None] + np.arange(tempo_map.FRAME)]
+    assert np.array_equal(np.lib.stride_tricks.sliding_window_view(padded, tempo_map.FRAME)[::tempo_map.HOP][:n], frames) and len(t) == len(w) == len(k)
 
 
 if __name__ == "__main__":

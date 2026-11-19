@@ -112,20 +112,27 @@ def bundle_said(before, after, lines, folder: Path):
 LIGHT, DARK = 0.75, 0.15   # a ground at or over LIGHT is light on purpose, at or under DARK dark on purpose
 
 
-def grounds(pngs):
+def as_rgb(p):
+    """A still as an RGB picture: a picture already decoded (look.main decodes each once), or one read from its path."""
+    from PIL import Image
+    return p if isinstance(p, Image.Image) else Image.open(p).convert("RGB")
+
+
+def grounds(pngs, decoded=None):
     """{still name: the brightness (0-1) of its ground}: the median of a ring 4 % in from the edge. A film whose ground is
     light (one film's page) or dark (one film's space, 3 to 4 stops under mid grey) is so on purpose, and raea's exposure warnings,
     judged against mid grey, said so on every frame."""
-    return light_frames(pngs, light=0.0)
+    return light_frames(pngs, light=0.0, decoded=decoded)
 
 
-def light_frames(pngs, light=LIGHT):
-    """{still name: brightness} for the stills whose ground is at least `light` (see grounds)."""
+def light_frames(pngs, light=LIGHT, decoded=None):
+    """{still name: brightness} for the stills whose ground is at least `light` (see grounds). `decoded`: {path: RGB
+    picture} already read, whose grey is the one a direct read gives (Pillow's one RGB-to-grey matrix)."""
     import numpy as np
     from PIL import Image
     out = {}
     for f in pngs:
-        x = np.asarray(Image.open(f).convert("L"))
+        x = np.asarray(decoded[f].convert("L") if decoded and f in decoded else Image.open(f).convert("L"))
         h, w = x.shape
         e = max(4, round(min(w, h) * 0.04))
         ring = np.concatenate([x[:e].ravel(), x[-e:].ravel(), x[e:-e, :e].ravel(), x[e:-e, -e:].ravel()])
@@ -205,13 +212,20 @@ def read_layers(path: Path):
         if c == 0:
             masks[f] = before
             continue
-        runs = struct.unpack(f"<{2 * c}H", d[p:p + 4 * c])
+        import numpy as np
+        runs = np.frombuffer(d, dtype="<u2", offset=p, count=2 * c)
         p += 4 * c
-        flat = []
-        for v, k in zip(runs[::2], runs[1::2]):
-            flat.extend([v] * k)
-        masks[f] = before = flat
+        masks[f] = before = np.repeat(runs[0::2], runs[1::2])   # the runs laid out as a flat array (a list of ints was built)
     return head, masks
+
+
+def layer_counts(mask):
+    """{layer value: pixels} of one frame's mask, counted at once (each pixel was counted in a Python loop). Keys come in
+    value order where the loop met them in pixel order; only a layer over 97 % of the frame is read from the top, and
+    two can't both be."""
+    import numpy as np
+    bc = np.bincount(np.asarray(mask, dtype=np.int64))
+    return {int(v): int(bc[v]) for v in np.flatnonzero(bc)}
 
 
 def overlay(masks, frames, total, share=0.99):
@@ -223,9 +237,7 @@ def overlay(masks, frames, total, share=0.99):
         mask = masks.get(f)
         if mask is None:
             return None
-        counts = {}
-        for v in mask:
-            counts[v] = counts.get(v, 0) + 1
+        counts = layer_counts(mask)
         top, n = max(counts.items(), key=lambda kv: kv[1])
         if top in (0, 65535) or n / total < share:
             return None
@@ -278,7 +290,6 @@ KINDS = (("cut", "FAULT, text cut by the frame's edge while on screen", True),
          ("outside", "text wholly outside the frame, not seen at that moment (a camera moving over a page puts much of it there)", False))
 
 WEBER_FLOOR = 0.22       # minimum acceptable |Weber contrast| for a text slice over a busy/photographic ground
-CROWD_FLOOR = 0.14       # Sobel edge-crowding score above which a background acts as a competing figure (e.g. a photograph)
 EYE_JUMP_DEG = 45.0      # Walter Murch eye-trace limit across a cut without a join hand-over, in degrees of visual angle
 EYE_DIST_W = 0.625       # viewing distance as a multiple of frame width (1200 px at 1920 wide)
 
@@ -392,66 +403,56 @@ def contrast_note(t, rgb, W, H, image_mask_2d=None, text_mask_2d=None, all_text_
         if not bool(text_mask_2d[ty0:ty1, tx0:tx1].any()):
             # Wholly covered by an opaque foreground panel/card: already reported under `drew no pixels`, not contrast
             return None
-    L = srgb_luma(rgb)
-    crop = L[y0:y1, x0:x1]
-    if float(np.ptp(crop)) < 0.02 and image_mask_2d is None:
-        return None
     pad = 8
     rx0, ry0, rx1, ry1 = max(0, x0 - pad), max(0, y0 - pad), min(W, x1 + pad), min(H, y1 + pad)
-    outer = L[ry0:ry1, rx0:rx1]
+    # the light of the text's box and its ring only (luma is per pixel): it was worked out over the whole frame for every
+    # line of text and read here alone, 2 million pixels each time on a 1080p tile
+    outer = srgb_luma(rgb[ry0:ry1, rx0:rx1])
     rmask = np.ones(outer.shape, dtype=bool)
     rmask[y0 - ry0:y1 - ry0, x0 - rx0:x1 - rx0] = False
-    ring = outer[rmask] if rmask.any() else crop.ravel()
+    ring = outer[rmask] if rmask.any() else outer[y0 - ry0:y1 - ry0, x0 - rx0:x1 - rx0].ravel()
 
     declared_ink_l = _parse_ink_luma(t.get("color"))
     ink_alpha = max(0.0, min(1.0, _parse_ink_alpha(t.get("color")) * float(t.get("opacity", 1.0) or 1.0)))
-    mh, mw = image_mask_2d.shape if image_mask_2d is not None else (0, 0)
+    mh, mw = image_mask_2d.shape
     n_slices = max(1, min(8, (x1 - x0) // 48))
     xs = np.linspace(x0, x1, n_slices + 1, dtype=int)
     bad_slices = []
     for sx0, sx1 in zip(xs[:-1], xs[1:]):
-        sl = L[y0:y1, sx0:sx1]
+        sl = outer[y0 - ry0:y1 - ry0, sx0 - rx0:sx1 - rx0]
         if sl.size < 16:
             continue
         gx = cv2.Sobel(sl, cv2.CV_32F, 1, 0, ksize=3)
         gy = cv2.Sobel(sl, cv2.CV_32F, 0, 1, ksize=3)
         sl_edges = np.minimum(1.0, cv2.magnitude(gx, gy))
-        if image_mask_2d is not None:
-            mx0, my0 = max(0, int(sx0 * mw / W)), max(0, int(y0 * mh / H))
-            mx1, my1 = min(mw, max(mx0 + 1, int(round(sx1 * mw / W)))), min(mh, max(my0 + 1, int(round(y1 * mh / H))))
-            mpatch = image_mask_2d[my0:my1, mx0:mx1]
-            if float(mpatch.mean()) >= 0.12:
-                # Upsample image-pixel mask to slice size so glyph strokes (stamped with the text layer id) are excluded
-                img_px_mask = cv2.resize(mpatch.astype(np.uint8), (sx1 - sx0, y1 - y0), interpolation=cv2.INTER_NEAREST) > 0
-                bg_vals = sl[img_px_mask] if int(img_px_mask.sum()) >= 12 else sl.ravel()
-                crowd = float(np.mean(sl_edges[img_px_mask])) if int(img_px_mask.sum()) >= 12 else float(np.mean(sl_edges))
-                crowd_floor = 0.08
-            elif all_text_mask_2d is not None:
-                # A translucent scrim `<div>` may cover an active photograph in RAEALAYR (`mpatch == 0`); mask out all
-                # dilated text glyph pixels and check whether the underlying non-text background is still photographic
-                at_patch = cv2.dilate(all_text_mask_2d[my0:my1, mx0:mx1].astype(np.uint8), np.ones((3, 3), np.uint8))
-                non_txt_px = cv2.resize(at_patch, (sx1 - sx0, y1 - y0), interpolation=cv2.INTER_NEAREST) == 0
-                if int(non_txt_px.sum()) < 24:
-                    continue
-                bg_vals = sl[non_txt_px]
-                if float(np.std(bg_vals)) < 0.08:
-                    continue
-                crowd = float(np.mean(sl_edges[non_txt_px]))
-                crowd_floor = 0.06
-            else:
+        mx0, my0 = max(0, int(sx0 * mw / W)), max(0, int(y0 * mh / H))
+        mx1, my1 = min(mw, max(mx0 + 1, int(round(sx1 * mw / W)))), min(mh, max(my0 + 1, int(round(y1 * mh / H))))
+        mpatch = image_mask_2d[my0:my1, mx0:mx1]
+        if float(mpatch.mean()) >= 0.12:
+            # Upsample image-pixel mask to slice size so glyph strokes (stamped with the text layer id) are excluded
+            img_px_mask = cv2.resize(mpatch.astype(np.uint8), (sx1 - sx0, y1 - y0), interpolation=cv2.INTER_NEAREST) > 0
+            bg_vals = sl[img_px_mask] if int(img_px_mask.sum()) >= 12 else sl.ravel()
+            crowd = float(np.mean(sl_edges[img_px_mask])) if int(img_px_mask.sum()) >= 12 else float(np.mean(sl_edges))
+            crowd_floor = 0.08
+        elif all_text_mask_2d is not None:
+            # A translucent scrim `<div>` may cover an active photograph in RAEALAYR (`mpatch == 0`); mask out all
+            # dilated text glyph pixels and check whether the underlying non-text background is still photographic
+            at_patch = cv2.dilate(all_text_mask_2d[my0:my1, mx0:mx1].astype(np.uint8), np.ones((3, 3), np.uint8))
+            non_txt_px = cv2.resize(at_patch, (sx1 - sx0, y1 - y0), interpolation=cv2.INTER_NEAREST) == 0
+            if int(non_txt_px.sum()) < 24:
                 continue
+            bg_vals = sl[non_txt_px]
+            if float(np.std(bg_vals)) < 0.08:
+                continue
+            crowd = float(np.mean(sl_edges[non_txt_px]))
+            crowd_floor = 0.06
         else:
-            bg_vals = sl.ravel()
-            rgx = cv2.Sobel(outer, cv2.CV_32F, 1, 0, ksize=3)
-            rgy = cv2.Sobel(outer, cv2.CV_32F, 0, 1, ksize=3)
-            ring_edges = np.minimum(1.0, cv2.magnitude(rgx, rgy))[rmask] if rmask.any() else sl_edges.ravel()
-            crowd = max(float(np.mean(sl_edges)), float(np.mean(ring_edges) + np.std(ring)))
-            crowd_floor = CROWD_FLOOR
+            continue
 
         if declared_ink_l is not None:
             ink_l = declared_ink_l
-            # Glyph strokes cover at most ~25% of a slice; sample background side closest to ink_l (30th / 70th pct when unmasked, 20th / 80th on pure image pixels)
-            pct = (20 if image_mask_2d is not None else 35) if ink_l < 0.5 else (80 if image_mask_2d is not None else 65)
+            # Glyph strokes cover at most ~25% of a slice; sample the background side closest to ink_l (20th / 80th percentile)
+            pct = 20 if ink_l < 0.5 else 80
             bg_l = float(np.percentile(bg_vals, pct))
             # see-through ink (rgba alpha, the text's opacity) shows the ground through it: what the eye sees is the mix
             # (white at half alpha over a mid photograph had been judged as white)
@@ -631,7 +632,9 @@ def report(out_dir: Path, frames, fps, pngs_by_frame=None):
         if f in rgb_cache:
             return rgb_cache[f]
         p = (pngs_by_frame or {}).get(f)
-        if p and Path(p).is_file():
+        if isinstance(p, Image.Image):
+            rgb_cache[f] = np.asarray(p)
+        elif p and Path(p).is_file():
             rgb_cache[f] = np.asarray(Image.open(p).convert("RGB"))
         else:
             rgb_cache[f] = None
@@ -661,14 +664,7 @@ def report(out_dir: Path, frames, fps, pngs_by_frame=None):
         general.append(f"not applied: {json.dumps(x)[:200]}")
     lp = out_dir / (man.get("layers") or "")
     if not man.get("layers") or not lp.is_file():
-        for f in frames:
-            rgb = rgb_of(f)
-            if rgb is not None and f in fd_by_frame:
-                for t in fd_by_frame[f].get("text", []):
-                    if t.get("opacity", 1) > 0.01 and not t["text"].startswith("[[") and edge_note(t, W, H) is None:
-                        cn = contrast_note(t, rgb, W, H)
-                        if cn:
-                            per.setdefault(f, []).append(cn)
+        # without layer masks contrast_note says nothing (it can't tell letters from their ground), so no tile is decoded
         general.append("no layer masks were written, so nothing can be said about what drew no pixels")
         return per, general
     head, masks = read_layers(lp)
@@ -689,9 +685,7 @@ def report(out_dir: Path, frames, fps, pngs_by_frame=None):
         mask = masks.get(f)
         if mask is None:
             continue
-        counts = {}
-        for v in mask:
-            counts[v] = counts.get(v, 0) + 1
+        counts = layer_counts(mask)
         top, n_top = max(counts.items(), key=lambda kv: kv[1])
         if top == over:
             continue                                  # said once above, not on every tile
@@ -770,16 +764,18 @@ def report(out_dir: Path, frames, fps, pngs_by_frame=None):
 def summary(per, frames, fps, worst=3):
     """The short report: for each kind with findings, one heading with how many cases (a text or a layer seen on several
     tiles is one case, at its worst), on which tiles, and its `worst` worst cases, each with the time of its worst tile."""
-    tile_of = {f: k + 1 for k, f in enumerate(frames)}
+    tiles_of = {}
+    for k, f in enumerate(frames):
+        tiles_of.setdefault(f, []).append(k + 1)  # direct look.py --at can round two moments to one frame
     lines = []
     for kind, heading, fault in KINDS:
         cases = {}
-        for f in frames:
+        for f, f_tiles in tiles_of.items():
             for n in per.get(f) or []:
                 if getattr(n, "kind", None) != kind:
                     continue
                 c = cases.setdefault(n.key, {"tiles": set(), "best": None})
-                c["tiles"].add(tile_of[f])
+                c["tiles"].update(f_tiles)
                 if c["best"] is None or n.rank > c["best"][0].rank:
                     c["best"] = (n, f)
         if not cases:
@@ -823,7 +819,7 @@ def sheet(pngs, labels, out: Path):
     n = len(pngs)
     cols = 1 if n == 1 else 2 if n <= 4 else 3 if n <= 9 else 4
     rows = -(-n // cols)
-    first = Image.open(pngs[0])
+    first = as_rgb(pngs[0])
     tw = min(first.width, 1920 // cols)
     th = round(first.height * tw / first.width)
     size = max(16, tw // 22)
@@ -846,9 +842,8 @@ def sheet(pngs, labels, out: Path):
     # would be, and the first person shown one asked which moment had not drawn
     slack = (rows * cols - n) * tw // 2
     for k, (p, lab) in enumerate(zip(pngs, labels)):
-        im = Image.open(p).convert("RGB")
+        im = as_rgb(p)
         if im.size != (tw, th):
-            im.draft("RGB", (tw, th))
             im = im.resize((tw, th), Image.BILINEAR)
         x, y = (k % cols) * tw + (slack if k // cols == rows - 1 else 0), (k // cols) * (th + strip)
         img.paste(im, (x, y + strip))
@@ -897,8 +892,12 @@ def main():
     waited, ran, rc, lines, bundled = draw(entry, uniq, work, a.composition)
     pngs = sorted(work.glob("frame-*.png"))
     if rc != 0 or len(pngs) != len(uniq):
-        bad = [l for l in lines if "REFUSED" in l or "error" in l.lower() or "panicked" in l] or lines[-6:]
-        print(f"FAILED raea rc {rc}, {len(pngs)} of {len(uniq)} stills ({ran:.2f}s): " + " | ".join(bad[:4]))
+        # raea's own plain reason first (the composition threw at frame N: ...), as the preflight said it: a page film's look
+        # runs no preflight when the queue is free, and the JS stack lines before it had read as the reason
+        refused = [r for r in (l.split("REFUSED", 1)[1].strip() for l in lines if "REFUSED" in l) if r]   # a bare REFUSED is no reason
+        bad = refused or [l for l in lines if "error" in l.lower() or "panicked" in l] or lines[-6:]
+        print(f"FAILED raea rc {rc} drawing {a.composition or 'the default composition'}, {len(pngs)} of {len(uniq)} stills ({ran:.2f}s): "
+              + " | ".join(bad[:4]))
         sys.exit(1)
     by_frame = dict(zip(uniq, pngs))  # raea names --at stills by their place in the list, not their frame
     t_sheet = time.monotonic()
@@ -907,9 +906,12 @@ def main():
     if not a.frames and abs(fps - guess) > 1e-6:
         print(f"look: the composition runs at {fps:g} a second, not the {guess:g} the seconds were read at: the tiles are frames "
               f"{', '.join(map(str, frames))}, labelled with their true times; ask again with those times", file=sys.stderr)
-    size = sheet([by_frame[f] for f in frames], labels, Path(a.out))
+    # each still decoded once, for the sheet, the report and the grounds (each read every PNG again)
+    from PIL import Image
+    decoded = {p: Image.open(p).convert("RGB") for p in pngs}
+    size = sheet([decoded[by_frame[f]] for f in frames], labels, Path(a.out))
     t_sheet = time.monotonic() - t_sheet
-    per, general = report(work, uniq, fps, pngs_by_frame=by_frame)
+    per, general = report(work, uniq, fps, pngs_by_frame={f: decoded[p] for f, p in by_frame.items()})
     full = []                                   # every finding on every tile: the file, and the screen with --all
     names = {"cut": "cut by the edge", "contrast": "figure-ground collision", "saccade": "saccade jump", "nothing": "drew no pixels", "box": "box past the edge", "blind": "mask blind", "3d": "3D not known", "outside": "outside the frame"}
     for k, f in enumerate(frames):
@@ -927,7 +929,8 @@ def main():
         if a.all:
             for n in notes:
                 print(f"    {n}")
-    ground = grounds(pngs)
+    ground = grounds(pngs, decoded)
+    decoded.clear()
     general, gone = quiet_exposure(general, ground)
     said, gone2 = quiet_exposure([f"raea: {l.strip()}" for l in lines if "REFUSED" in l or l.lstrip().startswith(("warn", "error"))], ground)
     refused = [s for s in said if "REFUSED" in s]

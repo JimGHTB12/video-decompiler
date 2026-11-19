@@ -46,6 +46,11 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         code, out = bare("look", cwd=tmp)
         assert "Traceback" not in out and "score.json" in out, f"nor does look outside a film folder, which says what it needs: {out}"
+    # E8: vd doctor's optional_tools reads voice_clean.FILTERS without importing numpy
+    p_vc = subprocess.run([sys.executable, "-X", "utf8", "-c",
+                           f"import sys; sys.modules['numpy'] = None; sys.path.insert(0, r'{VD.parent}'); import vd; vd.optional_tools()"],
+                          capture_output=True, text=True, encoding="utf-8", errors="replace")
+    assert p_vc.returncode == 0 and "vd audio --clean-voice" in p_vc.stdout, (p_vc.returncode, p_vc.stdout, p_vc.stderr)
     print("bare python checks passed")
 
 

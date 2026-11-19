@@ -103,6 +103,133 @@ def test_bridge_timelines_carry_the_films_sound_and_agree_on_placement():
             rate = xml.find(".//file/media/audio/samplecharacteristics/samplerate")
             assert (rate.text if rate is not None else None) == (str(sound[1]) if sound else None)
 
+def test_capture_gives_the_plane_its_imports_in_a_kit_of_the_films_own():
+    # broke (Eb5): a film whose kit/lib held a file of its own got no kit/lib/faces.ts or scene.tsx, as kit/lib existed,
+    # so PuppetPlane.tsx imported files that were not there
+    with tempfile.TemporaryDirectory() as tmp:
+        film = Path(tmp) / "film"
+        (film / "kit" / "lib").mkdir(parents=True)
+        own = film / "kit" / "lib" / "helper.ts"
+        own.write_text("export const MINE = 1;\n", encoding="utf-8")
+        _, plane = puppet.write_puppet_files(film, {"name": "r"}, {"lines": []})
+        specs = lean.IMPORT.findall(plane.read_text(encoding="utf-8"))
+        assert specs and all(lean.resolves(plane, spec) for spec in specs), [s for s in specs if not lean.resolves(plane, s)]
+        assert own.read_text(encoding="utf-8") == "export const MINE = 1;\n", "the film's own kit file is left as it was"
+        assert lean.prune_unresolved(film / "kit") == []
+        assert (film / "kit" / "lib" / "Inter-OFL.txt").is_file(), "the faces keep their licence texts beside them"
+
+
+def test_a_new_kit_leaves_out_what_cannot_resolve_as_the_copy_and_prune_did():
+    # kit_plan drops in memory what copying PAGE_KIT and prune_unresolved dropped on disk: a broken import, a file broken
+    # through it, and keeps an import of the film's ../../ids and of a folder's index
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as tmp:
+        lib = Path(tmp) / "planted"
+        for f, text in {"ok.ts": 'import { X } from "../../ids";\nimport { J } from "./sub";', "broken.ts": 'import "./gone";',
+                        "through.tsx": 'import "./broken";', "sub/index.tsx": "export const J = 1;"}.items():
+            (lib / f).parent.mkdir(parents=True, exist_ok=True)
+            (lib / f).write_text(text, encoding="utf-8")
+        films = []
+        for way in ("plan", "copy and prune"):
+            d = Path(tmp) / way.replace(" ", "-")
+            d.mkdir()
+            (d / "ids.ts").write_text("export const X = 1;\n", encoding="utf-8")
+            with patch.object(lean, "PAGE_KIT", dict(lean.PAGE_KIT, planted=lib)):
+                if way == "plan":
+                    plan, dropped = lean.kit_plan(d)
+                    for f, src in plan.items():
+                        lean.copy_any(src, d / f)
+                else:
+                    for name, src in lean.PAGE_KIT.items():
+                        lean.copy_any(src, d / "kit" / name)
+                    dropped = lean.prune_unresolved(d / "kit")
+            films.append((dropped, sorted(p.relative_to(d).as_posix() for p in (d / "kit").rglob("*") if p.is_file())))
+        assert films[0] == films[1], films
+        assert films[0][0] == ["planted/broken.ts", "planted/through.tsx"], films[0][0]
+        assert "kit/planted/ok.ts" in films[0][1] and "kit/planted/sub/index.tsx" in films[0][1]
+
+
+def test_a_repository_is_read_by_its_own_folders_alone():
+    # broke (Eb4): the skipped folders were tested against the whole path, so a repository kept under a folder called
+    # build/ read no function at all; and borrow counted the Python files of a .venv that capture's counts left out
+    import borrow
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp) / "build" / "tool"
+        (repo / "pkg").mkdir(parents=True)
+        (repo / "pkg" / "main.py").write_text("def run():\n    return 1\n\nclass Tool:\n    pass\n", encoding="utf-8")
+        for skipped in (".venv", "node_modules", "dist"):
+            (repo / skipped / "lib").mkdir(parents=True)
+            (repo / skipped / "lib" / "dep.py").write_text("def dep():\n    pass\n", encoding="utf-8")
+        facts = puppet.analyze_codebase(repo)
+        assert (facts["functions"], facts["classes"], facts["python_files"]) == (1, 1, 1), facts
+        assert borrow.inspect_repo(repo)["python_files"] == 1
+
+
+def test_capture_counts_every_def_ast_walk_counts():
+    # puppet.statements walks statements only; a def or class in any statement list (if, loops' else, try's handlers,
+    # else and finally, with, match cases, class and def bodies) is counted as ast.walk counted it
+    import ast
+    src = """
+import contextlib
+@contextlib.contextmanager
+def a(): yield
+class K:
+    def m(self): pass
+    class Inner:
+        async def test_x(self): pass
+if 1:
+    def b(): pass
+elif 2:
+    def c(): pass
+else:
+    def d(): pass
+for i in []:
+    def e(): pass
+else:
+    def f(): pass
+while 0:
+    def g(): pass
+else:
+    def h(): pass
+try:
+    def i(): pass
+except ValueError:
+    def j(): pass
+else:
+    def k(): pass
+finally:
+    def test_l(): pass
+with open(__file__):
+    def n(): pass
+async def o():
+    async with x:
+        def p(): pass
+    async for q in y:
+        def r(): pass
+    else:
+        class S: pass
+match z:
+    case 1:
+        def t(): pass
+    case _:
+        class U:
+            def test_v(self): pass
+lam = lambda: (lambda: 0)
+def w():
+    def w2():
+        def w3(): pass
+"""
+    if sys.version_info >= (3, 11):
+        src += "try:\n    pass\nexcept* OSError:\n    def m2(): pass\n"
+
+    def kinds(nodes):
+        return sorted((type(n).__name__, n.name) for n in nodes if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)))
+    for text in (src, (TOOLS / "lean.py").read_text(encoding="utf-8"), Path(__file__).read_text(encoding="utf-8")):
+        tree = ast.parse(text)
+        assert kinds(puppet.statements(tree)) == kinds(ast.walk(tree))
+    assert len(kinds(puppet.statements(ast.parse(src)))) >= 28
+
+
 def test_capture_runs_no_shell():
     py = sys.executable
     with tempfile.TemporaryDirectory() as tmp:
@@ -169,6 +296,21 @@ def test_capture_keeps_every_line_and_the_plane_shows_the_latest():
         _, plane = puppet.write_puppet_files(Path(tmp), puppet.analyze_codebase(Path(tmp)), rec)
         src = plane.read_text(encoding="utf-8")
         assert "lines.slice(-8)" in src and "lines.slice(0, 8)" not in src, "the plane scrolls like a terminal: the latest lines show"
+        # Eb7: standalone puppet.py accepts --cue on capture and --like (-o/--out) on launch, and bridge.__doc__ matches the tracks
+        assert "always names two sound tracks" not in (bridge.__doc__ or "") and "OTIO does not" not in (bridge.__doc__ or ""), bridge.__doc__
+        env = {**os.environ, "VD_OUT": str(Path(tmp) / "vd" / "out"), "VD_READS": str(Path(tmp) / "vd" / "reads")}
+        linden_out = Path(tmp) / "launched-linden"
+        p_launch = subprocess.run([py, "-X", "utf8", str(TOOLS / "puppet.py"), "launch", str(Path(tmp)), "--out", str(linden_out), "--like", "linden"],
+                                  capture_output=True, text=True, env=env)
+        assert p_launch.returncode == 0, (p_launch.returncode, p_launch.stdout, p_launch.stderr)
+        linden_score = json.loads((ROOT / "skills" / "video-decompiler" / "library" / "films" / "linden" / "score.json").read_text(encoding="utf-8"))
+        got_score = json.loads((linden_out / "score.json").read_text(encoding="utf-8"))
+        assert got_score["duration"] == linden_score["duration"] == 30.0 and got_score.get("shutter") == linden_score["shutter"], got_score
+        p_cap = subprocess.run([py, "-X", "utf8", str(TOOLS / "puppet.py"), "capture", "--repo", str(Path(tmp)), "--film", str(linden_out), "--cue", "END"],
+                               capture_output=True, text=True, env=env)
+        assert p_cap.returncode == 0, (p_cap.returncode, p_cap.stdout, p_cap.stderr)
+        end_sec = dict(lean.gen_data(linden_out)["CUES"])["END"]
+        assert f"export const PUPPET_CUE_SEC = {end_sec};" in (linden_out / "kit" / "puppet.gen.ts").read_text(encoding="utf-8")
 
 
 def test_bridge_times_events_by_the_films_named_cues():
@@ -186,6 +328,32 @@ def test_bridge_times_events_by_the_films_named_cues():
         got = {e.get("role") for e in doc["events"]}
         assert set(named) <= got, f"named events lost: {sorted(set(named) - got)}"
         assert "END" in named, "the last act's END cue should be inside the film"
+        # Eb3: a 12.000 s 60/15/30 fps concat (420 frames, nominal 60/1) keeps its 12.0 s duration and every cue
+        segs = []
+        for idx, fps in enumerate((60, 15, 30)):
+            seg = Path(tmp) / f"seg{idx}.ts"
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"color=c=black:s=320x180:r={fps}:d=4",
+                            "-c:v", "libx264", "-pix_fmt", "yuv420p", str(seg)], check=True)
+            segs.append(seg)
+        lst = Path(tmp) / "concat.txt"
+        lst.write_text("".join(f"file '{s.as_posix()}'\n" for s in segs), encoding="utf-8")
+        vfr = Path(tmp) / "vfr12.mp4"
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", str(vfr)], check=True)
+        vfr_out = Path(tmp) / "b-vfr"
+        assert quiet(lean.main, ["bridge", "--film", str(film), "--video", str(vfr), "-o", str(vfr_out)]) == 0
+        vfr_info = bridge.picture_identity_and_schedule(vfr)
+        vfr_doc = json.loads((vfr_out / "cues.json").read_text(encoding="utf-8"))
+        vfr_named = [n for n, t in lean.gen_data(film)["CUES"] if t <= 12.0]
+        vfr_got = {e.get("role") for e in vfr_doc["events"]}
+        assert vfr_info["duration_s"] == 12.0 and vfr_doc["sections"][-1]["b"] == 12.0 and set(vfr_named) <= vfr_got, (
+            vfr_info["duration_s"], vfr_doc["sections"], sorted(set(vfr_named) - vfr_got))
+        # Eb2: starter scores store beat names under "id" (open, claim, proof, close)
+        starter = Path(tmp) / "starter-launch"
+        quiet(lean.main, ["new", str(starter), "--kind", "launch"])
+        s_out = Path(tmp) / "b-starter"
+        assert quiet(lean.main, ["bridge", "--film", str(starter), "--video", str(stet_mp4), "-o", str(s_out)]) == 0
+        s_doc = json.loads((s_out / "cues.json").read_text(encoding="utf-8"))
+        assert [sec["id"] for sec in s_doc["sections"]] == ["open", "claim", "proof", "close"], s_doc["sections"]
 
 
 def test_bridge_says_its_hash_is_the_picture_streams_and_gives_the_files():
@@ -265,8 +433,30 @@ def test_bridge_gives_every_channel_a_track():
                         "sine=f=440:d=2", "-filter_complex", "[1]pan=5.1|c0=c0|c1=c0|c2=c0|c3=c0|c4=c0|c5=c0[a]", "-map", "0:v", "-map", "[a]",
                         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(v)], check=True)
         out = Path(tmp) / "out"
-        assert quiet(lean.main, ["bridge", "--film", str(film), "--video", str(v), "-o", str(out)]) == 0
+        from unittest.mock import patch
+        real_run = bridge.subprocess.run
+        calls = []
+        with patch.object(bridge.subprocess, "run", side_effect=lambda cmd, *a, **kw: (
+                calls.append((Path(cmd[0]).stem, kw.get("creationflags"))), real_run(cmd, *a, **kw))[1]):
+            assert quiet(lean.main, ["bridge", "--film", str(film), "--video", str(v), "-o", str(out)]) == 0
+        assert all(flags == bridge.NO_WINDOW for _, flags in calls), f"every bridge ffmpeg and ffprobe passes NO_WINDOW: {calls}"
+        # was three: the stream, its packets and the sound each had their own
+        assert [name for name, _ in calls].count("ffprobe") == 1, calls
         assert len(ET.parse(out / "timeline.xml").getroot().findall("sequence/media/audio/track")) == 6
+
+
+def test_bridge_microseconds_round_as_a_fraction_does():
+    # ticks_us is round(ticks * base * 1000000) in whole numbers: halves go to the even neighbour, below 0 too
+    from fractions import Fraction
+    import random
+    rng = random.Random(4)
+    bases = [Fraction(1, 2000000), Fraction(1, 90000), Fraction(1, 15360), Fraction(1, 30000), Fraction(1001, 60000), Fraction(1, 3)]
+    halves = 0
+    for base in bases:
+        for ticks in list(range(-50, 50)) + [rng.randrange(-10 ** 12, 10 ** 12) for _ in range(500)]:
+            halves += (ticks * base * 1000000).denominator == 2
+            assert bridge.ticks_us(ticks, base) == round(ticks * base * 1000000), (ticks, base)
+    assert halves > 100, halves
 
 
 if __name__ == "__main__":

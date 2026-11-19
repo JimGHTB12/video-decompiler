@@ -29,9 +29,13 @@ reading by about 0.02. It reads how a film moves, and nothing about whether a mo
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import cv2
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from film_diff import ffprobe  # noqa: E402
 
 HIGH, FPS = 360, 12
 MOST, MOVED, LEAST = 0.6, 0.6, 0.8   # most of the points; a point has moved past this many px; and the usual move is at least this
@@ -41,22 +45,17 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def size(path):
-    """The film's width and height in px, or a refusal in words."""
-    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", str(path)],
-                       capture_output=True, text=True, creationflags=NO_WINDOW)
-    try:
-        w, h = (int(v) for v in r.stdout.strip().split(",")[:2])
-    except ValueError:
-        raise SystemExit(f"{path}: can't read its size ({r.stderr.strip()[-200:] or 'ffprobe said nothing'})")
-    return w, h
+    """The film's shown width and height in px, after any rotation, or a refusal in words."""
+    raw = ffprobe(path)
+    return raw["w"], raw["h"]
 
 
-def frames(path, fps=FPS):
-    """Grey pictures of the film, `fps` a second (every frame when None), HIGH px high at the film's own shape. Stops by
-    itself at the end."""
-    w, h = size(path)
+def frames(path, fps=FPS, shape=None):
+    """Grey pictures of the film, `fps` a second, HIGH px high at the film's own shape (its shown (w, h), when the caller
+    has probed it already). Stops by itself at the end."""
+    w, h = size(path) if shape is None else shape
     wide = max(2, int(round(w * HIGH / h / 2)) * 2)
-    p = subprocess.Popen(["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(path), "-vf", (f"fps={fps}," if fps else "") + f"scale={wide}:{HIGH}:flags=area", "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+    p = subprocess.Popen(["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(path), "-vf", f"fps={fps},scale={wide}:{HIGH}:flags=area", "-f", "rawvideo", "-pix_fmt", "gray", "-"],
                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=NO_WINDOW)
     try:
         while True:
@@ -103,44 +102,12 @@ def pair(a, b):
     return "scene" if np.percentile(off, 75) >= APART else "sheet"   # a quarter of the picture, so one thing moving by itself on a sliding sheet isn't a scene
 
 
-# How far things travel from one frame to the next, for the shutter (vd.py `shoot`), which gives a fast frame more pictures
-FAST = 95          # the percentile of the distances: one fast thing on a still picture is a fast frame, and a few corners followed wrong are not
-FOLLOWED = 0.05    # under one corner in twenty followed, or under four corners, and nothing could be followed: a cut, which is not motion
-LEVELS = 4         # the follow's pyramid: at 360 px high it follows a move of some 160 px a frame, about 480 px at 1080
-
-
-def travel(path):
-    """How far things travel from each frame of the film to the next, in px at the film's own size, one number a frame:
-    the 95th percentile of how far its corners went. Corners are followed both ways, from each picture into the next and
-    from the next back into it, so a card rising out of the top of the picture, whose corners leave it, is still read
-    by the corners of the picture it rose into. None where almost nothing could be followed, as across a cut. The last
-    frame has no next one, so it takes the move into it.
-
-    Why both ways: followed one way only, the frames of a card rising out of a film's picture at 100 to 160 px a frame
-    read as cuts (2 to 30 per cent of corners followed), and would have kept the fewest pictures where they need most."""
-    scale = size(path)[1] / HIGH
-    out, prev = [], None
-    for f in frames(path, fps=None):
-        if prev is not None:
-            moved, found = [], 0
-            for a, b in ((prev, f), (f, prev)):
-                p0, p1, n = follow(a, b, corners=1000, levels=LEVELS)
-                moved.append(np.linalg.norm(p1 - p0, axis=1))
-                found += n
-            moved = np.concatenate(moved)
-            out.append(None if len(moved) < 4 or len(moved) < FOLLOWED * found else round(float(np.percentile(moved, FAST)) * scale, 1))
-        prev = f
-    if prev is not None:
-        out.append(out[-1] if out else None)
-    return out
-
-
-def read(path):
+def read(path, shape=None):
     """{"scene_move", "sheet_move", "readable"}: shares of the film's length. The first two are None when under four in
     ten of its pictures had enough to follow, since a share of what couldn't be read isn't a measurement."""
     cv2.setRNGSeed(0)   # the fit draws its samples from OpenCV's own generator: the same film reads the same twice
     prev, found = None, []
-    for f in frames(path):
+    for f in frames(path, shape=shape):
         if prev is not None:
             found.append(pair(prev, f))
         prev = f

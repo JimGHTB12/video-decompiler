@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tools/lean.py's pure parts, with known answers: which command lines it claims, the usage log line, the gap table's
+"""tools/lean.py's pure parts, with known answers: splice and export intermediates, the usage log line, the gap table's
 order, where a planted hit peaks, the level in a planted pause, a planted silent hole, and the splice's frame cuts.
 No raea and no ffmpeg needed.
 
@@ -22,13 +22,152 @@ import lean  # noqa: E402
 tempfile.tempdir = str(Path(tempfile.gettempdir()).resolve())
 
 
-def test_claims():
-    assert lean.claims(["new", "x", "--kind", "explainer"])
-    assert not lean.claims(["new", "x", "--board"]), "the old `vd new` keeps its meaning"
-    assert lean.claims(["look"]) and lean.claims(["export"]) and lean.claims(["pin", "ref.mp4"]) and lean.claims(["profile"])
-    assert lean.claims(["render", "--from", "1", "--to", "2"]) and not lean.claims(["render", "--shutter"])
-    assert lean.claims(["measure", "film.mp4", "--against", "ref.mp4"]) and not lean.claims(["measure"])
-    assert lean.claims(["sound", "--onto", "f.mp4"]) and not lean.claims(["sound", "--palette", "p"])
+def test_splice_unlinks_range_intermediates_and_export_unlinks_part_manifests():
+    import contextlib
+    import io
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as tmp:
+        d, _, _ = fake_film(tmp)
+        out = Path(tmp) / "out"
+
+        def draw(dd, entry, target, *flags, env=None):
+            target = Path(target)
+            target.write_bytes(b"mp4")
+            target.with_name(target.name + ".render.json").write_text("{}", encoding="utf-8")
+            return True, 0.1, "OK"
+
+        def fake_heavy(args, **kw):
+            # args ends with splice_args(..., tmp_mp4) where tmp_mp4 is picture.splice.mp4
+            Path(args[-1]).write_bytes(b"spliced")
+
+        with patch.object(lean, "OUTROOT", out), patch.object(lean, "raea_render", draw), \
+                patch.object(lean, "must_preflight", lambda *a, **k: None), patch.object(lean, "mux", lambda *a, **k: None), \
+                patch.object(lean, "hand_in", lambda dest: (dest, [])), \
+                patch.object(lean, "build_sound", lambda dd, s: Path(lean.outdir(dd) / "sound.wav").write_bytes(b"w")), \
+                patch.object(lean, "comp_frames", lambda e, c: None), \
+                patch.object(lean, "run", fake_heavy), patch.object(lean, "join_report", lambda *a: "joins ok"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            lean.cmd_export(Args(film=str(d)))
+            o = lean.outdir(d)
+            assert not list(o.glob("*.render.json")), list(o.glob("*.render.json"))
+            lean.cmd_render(Args(film=str(d), from_="0.2", to="0.6"))
+            assert not list(o.glob("range-*")), list(o.glob("range-*"))
+
+
+def test_clean_takes_a_range_only_when_an_interrupted_splice_left_it():
+    # a review's finding: range-*.mp4 as a pattern also matched a film named range-demo's finished film, an export
+    # named so, and a range rendered alone, and plain `vd clean --yes` deleted them
+    import contextlib
+    import io
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        wav = root / "sound.wav"
+        wav.write_bytes(b"stand-in sound")
+
+        def film(name):
+            d = root / name
+            d.mkdir()
+            (d / "main.tsx").write_text("// fake", encoding="utf-8")
+            (d / "score.json").write_text(json.dumps({"fps": 30, "duration": 1, "composition": "film", "beats": []}), encoding="utf-8")
+            return d
+
+        def draw(d, entry, target, *flags, env=None):
+            Path(target).write_bytes(b"drawn")
+            Path(str(target) + ".render.json").write_text("{}", encoding="utf-8")
+            return True, 0.1, "OK"
+
+        def stopped(args, **kw):
+            raise KeyboardInterrupt  # the splice's encode, stopped part way
+
+        mux = lambda pic, w, dest, **kw: Path(dest).write_bytes(b"finished muxed film")
+        with patch.object(lean, "OUTROOT", root / "out"), patch.object(lean, "raea_render", draw), patch.object(lean, "must_preflight", lambda *a, **k: None), \
+                patch.object(lean, "comp_frames", lambda *a: None), patch.object(lean, "room", lambda *a, **k: None), \
+                patch.object(lean, "film_sound", lambda *a: (wav, None)), patch.object(lean, "mux", mux), \
+                patch.object(lean, "held_under_peak", lambda *a, **kw: None), patch.object(lean, "hand_in", lambda dest: (dest, [])), \
+                patch.object(lean, "scanned", lambda *a, **kw: root / "scan.txt"), patch.object(lean, "range_entry", lambda d, *a: d / "main.tsx"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            demo = film("range-demo")
+            lean.main(["export", "--film", str(demo)])
+            o = root / "out" / "range-demo"
+            finished, cut = o / "range-demo.mp4", o / "cuts" / "range-demo-cut1.mp4"
+            assert finished.is_file() and cut.is_file(), sorted(p.name for p in o.rglob("*"))
+            # an export named like a range part, beside them
+            named = o / "range-12-30.mp4"
+            lean.main(["export", "--film", str(demo), "-o", str(named)])
+            assert named.is_file()
+            lean.main(["clean", "range-demo", "--yes"])
+            assert finished.is_file() and cut.is_file() and named.is_file(), sorted(p.name for p in o.rglob("*"))
+            # a range rendered alone (no picture to splice into yet) is the person's to keep
+            alone = film("alone")
+            lean.main(["render", "--film", str(alone), "--from", "0", "--to", "0.5"])
+            part = root / "out" / "alone" / "range-0-15.mp4"
+            assert part.is_file() and not list(part.parent.glob("*.splicing"))
+            lean.main(["clean", "alone", "--yes"])
+            assert part.is_file(), "a standalone range render survives clean"
+            # a splice stopped after its range was drawn: the part it recorded goes with its record
+            cut_short = film("cut-short")
+            lean.main(["export", "--film", str(cut_short)])
+            with patch.object(lean, "run", stopped):
+                try:
+                    lean.main(["render", "--film", str(cut_short), "--from", "0", "--to", "0.5"])
+                except KeyboardInterrupt:
+                    pass
+            left = root / "out" / "cut-short" / "range-0-15.mp4"
+            assert left.is_file() and Path(str(left) + ".splicing").is_file()
+            planned = {p.name for p, _, _ in lean.clean_plan(left.parent)}
+            assert {"range-0-15.mp4", "range-0-15.mp4.render.json", "range-0-15.mp4.splicing"} <= planned, planned
+            lean.main(["clean", "cut-short", "--yes"])
+            assert not left.exists() and not list(left.parent.glob("range-*")), sorted(p.name for p in left.parent.iterdir())
+            assert (left.parent / "cut-short.mp4").is_file(), "and the finished film beside it stays"
+
+
+def test_a_wav_vd_wrote_is_read_without_ffmpeg_and_reads_the_same():
+    # A8: a 16-bit stereo WAV at 48 kHz is read directly; the samples must be ffmpeg's to the bit, from the same first
+    # sample, at starts on either side of a sample's edge (ffmpeg reads -ss to the microsecond and takes the nearest).
+    # Anything else (mono, which ffmpeg spreads at -3 dB; 44.1 kHz; 24-bit) still goes through ffmpeg
+    import subprocess
+    import wave
+    from unittest.mock import patch
+    rng = np.random.default_rng(7)
+    with tempfile.TemporaryDirectory() as tmp:
+        made = {}
+        for name, ch, rate, width in (("st", 2, 48000, 2), ("mono", 1, 48000, 2), ("r441", 2, 44100, 2), ("w24", 2, 48000, 3)):
+            made[name] = Path(tmp) / f"{name}.wav"
+            with wave.open(str(made[name]), "wb") as w:
+                w.setnchannels(ch); w.setsampwidth(width); w.setframerate(rate)
+                w.writeframes(rng.integers(0, 256, rate * 2 * ch * width, dtype=np.uint8).tobytes())
+
+        def by_ffmpeg(p, s):
+            done = subprocess.run(["ffmpeg", "-v", "error", "-ss", str(s), "-i", str(p), "-vn", "-ac", "2", "-ar", "48000", "-f", "f32le", "-"], capture_output=True)
+            return None if done.returncode else np.frombuffer(done.stdout, np.float32).reshape(-1, 2)
+        ran = []
+        real_run = lean.run
+        with patch.object(lean, "run", lambda args, **k: (ran.append(args), real_run(args, **k))[1]):
+            for s in (0.0, 0.5, 1 / 3, 1.2345678, 1.000010, 1.0000104, 1.000011, 0.999989, 0.99999, 2.0):
+                got, want = lean.read_audio(made["st"], s), by_ffmpeg(made["st"], s)
+                assert np.array_equal(got, want), (s, got.shape, want.shape)
+            assert not ran, f"a 16-bit stereo 48 kHz WAV is read without ffmpeg: {ran[:1]}"
+            for name in ("mono", "r441", "w24"):
+                ran.clear()
+                assert np.array_equal(lean.read_audio(made[name]), by_ffmpeg(made[name], 0.0)) and ran, name
+        assert lean._wav_samples(made["st"], 1.04e-05) is None, "a start ffmpeg refuses (1.04e-05) is left to ffmpeg"
+        # a review's finding: a WAV written to a pipe leaves its sizes unfilled and says it holds 4 GB; reading the
+        # frames its header claims asked for all of it at once (MemoryError). It is ffmpeg's to read, as it was
+        piped = Path(tmp) / "piped.wav"
+        piped.write_bytes(subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=d=0.1:r=48000", "-ac", "2", "-c:a", "pcm_s16le",
+                                          "-f", "wav", "-"], capture_output=True, check=True).stdout)
+        with wave.open(str(piped), "rb") as w:
+            assert w.getnframes() * 4 > piped.stat().st_size, "the fixture is a WAV whose header claims more than it holds"
+        assert lean._wav_samples(piped, 0.0) is None, "a WAV whose header claims more than the file holds is left to ffmpeg"
+        assert np.array_equal(lean.read_audio(piped), by_ffmpeg(piped, 0.0)) and lean.read_audio(piped).shape == (4800, 2)
+        # the re-check's finding: a stream's header left at 0 frames, with the sound after it, read as no sound at all
+        import struct
+        unsized = Path(tmp) / "unsized.wav"
+        sound = rng.integers(-2000, 2000, 4800 * 2, dtype=np.int16).tobytes()
+        unsized.write_bytes(struct.pack("<4sI4s4sIHHIIHH4sI", b"RIFF", 0xFFFFFFFF, b"WAVE", b"fmt ", 16, 1, 2, 48000, 192000, 4, 16, b"data", 0) + sound)
+        assert lean._wav_samples(unsized, 0.0) is None, "a WAV that says it holds no frames is left to ffmpeg"
+        assert lean.read_audio(unsized).shape == (4800, 2) and np.array_equal(lean.read_audio(unsized), by_ffmpeg(unsized, 0.0))
 
 
 def test_usage_log():
@@ -38,6 +177,22 @@ def test_usage_log():
         lean.usage_log("sound", None, 1, path=log)
         rows = [l.split("\t") for l in log.read_text(encoding="utf-8").splitlines()]
         assert len(rows) == 2 and rows[0][1] == "look" and rows[0][3] == "2.3" and rows[1][2] == "-"
+        import os
+        import subprocess
+        fake_home, iso = Path(tmp) / "fake_home", Path(tmp) / "iso"
+        fake_home.mkdir()
+        clip = Path(tmp) / "clip.mp4"
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=red:s=160x90:r=24:d=1",
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", str(clip)], check=True)
+        env = {**{k: v for k, v in os.environ.items() if k != "VD_READS"},
+               "VD_OUT": str(iso / "out"), "USERPROFILE": str(fake_home), "HOME": str(fake_home)}
+        p1 = subprocess.run([sys.executable, "-X", "utf8", str(TOOLS / "vd.py"), "new", str(Path(tmp) / "f"), "--kind", "launch", "--bare"],
+                            capture_output=True, text=True, env=env)
+        p2 = subprocess.run([sys.executable, "-X", "utf8", str(TOOLS / "pack.py"), str(clip), "--against", str(clip)],
+                            capture_output=True, text=True, env=env)
+        assert p1.returncode == 0 and p2.returncode == 0, (p1.stdout + p1.stderr, p2.stdout + p2.stderr)
+        assert not list(fake_home.iterdir()), f"VD_OUT keeps everything out of ~/.vd: {list(fake_home.rglob('*'))}"
+        assert (iso / "usage.log").is_file() and (iso / "out" / "clip" / "pack-1-KEY.txt").is_file() and (iso / "measures").is_dir() and (iso / "reads").is_dir()
 
 
 def test_gap_rows_order():
@@ -362,11 +517,139 @@ def made_film(path, pop_at=None, n=60):
 
 
 def test_the_join_check_names_a_join_that_pops_and_passes_a_clean_one():
+    import subprocess
+    from unittest.mock import patch
     with tempfile.TemporaryDirectory() as tmp:
         bad = lean.join_report(made_film(Path(tmp) / "bad.mp4", pop_at=30), [30])
         good = lean.join_report(made_film(Path(tmp) / "good.mp4"), [30])
     assert "changes more than the frames round it" in bad and "frame 30" in bad, bad
     assert "clean" in good and "pops" not in good, good
+    # A4: frames are counted in the file's own frames on a variable-rate film (40 at 20 fps, then 80 at 60 fps) with
+    # a pop at frame 60; read at one rate the 20 fps frames came three times over and frame 60 was a held frame
+    w, h = 160, 90
+    with tempfile.TemporaryDirectory() as tmp:
+        parts = []
+        for k, (first, count, fps) in enumerate(((0, 40, 20), (40, 80, 60))):
+            frames = []
+            for i in range(first, first + count):
+                x = np.tile(np.linspace(0, 255, w), (h, 1)) * 0.6 + i * 0.8 + (45 if i == 60 else 0)
+                frames.append(np.clip(x, 0, 255).astype(np.uint8))
+            part = Path(tmp) / f"part{k}.mp4"
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "gray", "-s", f"{w}x{h}", "-r", str(fps), "-i", "-",
+                            "-c:v", "libx264", "-crf", "8", "-pix_fmt", "yuv420p", "-video_track_timescale", "600", str(part)],
+                           input=np.stack(frames).tobytes(), check=True)
+            parts.append(part)
+        listing = Path(tmp) / "parts.txt"
+        listing.write_text("".join(f"file '{q.as_posix()}'\n" for q in parts), encoding="utf-8")
+        vfr = Path(tmp) / "vfr.mp4"
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(listing), "-c", "copy", str(vfr)], check=True)
+        said = lean.join_report(vfr, [60])
+        quiet = lean.join_report(vfr, [90])
+    assert "frame 60 changes more than the frames round it" in said, said
+    assert "frame 90 clean" in quiet, quiet
+    ran = []
+    with patch.object(lean, "run", lambda *a, **k: ran.append(a)):
+        assert lean.join_report(Path("no-such.mp4"), []) == "joins: none inside the film" and not ran, ran
+
+
+def test_a_look_that_raea_refuses_ends_on_raeas_plain_reason():
+    # A1b: with no preflight before a page film's look, a composition that throws is said by look.py: one line naming
+    # the composition and raea's own reason, not the JS stack lines raea prints before it
+    import contextlib
+    import io
+    import look
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as tmp:
+        entry = Path(tmp) / "main.tsx"
+        entry.write_text("// a film\n", encoding="utf-8")
+        said = ["[ERROR raea_runtime_react::thread] [js] [js] react error:     at Film (bundle.js:15091:54)",
+                "REFUSED  the composition threw at frame 239: Error: planted at frame 239"]
+        out = io.StringIO()
+        with patch.object(look, "draw", lambda *a, **k: (0.0, 0.3, 1, said, "")), patch.object(look, "fps_of", lambda *a, **k: 60), \
+                patch.object(sys, "argv", ["look.py", str(entry), "--at", "60,239", "--frames", "--composition", "film-look", "-o", str(Path(tmp) / "l.jpg")]), \
+                contextlib.redirect_stdout(out):
+            try:
+                look.main()
+                raise AssertionError("a refused look exits 1")
+            except SystemExit as e:
+                assert e.code == 1, e.code
+        line = out.getvalue().strip().splitlines()[-1]
+        assert line.startswith("FAILED raea rc 1 drawing film-look") and line.endswith("the composition threw at frame 239: Error: planted at frame 239"), line
+        assert "bundle.js" not in line, line
+        # a bare REFUSED line is no reason: the error line is said, not an empty reason (a review's finding)
+        out = io.StringIO()
+        with patch.object(look, "draw", lambda *a, **k: (0.0, 0.3, 1, ["error: the real reason", "REFUSED"], "")), patch.object(look, "fps_of", lambda *a, **k: 60), \
+                patch.object(sys, "argv", ["look.py", str(entry), "--at", "60,239", "--frames", "--composition", "film-look", "-o", str(Path(tmp) / "l.jpg")]), \
+                contextlib.redirect_stdout(out):
+            try:
+                look.main()
+                raise AssertionError("a refused look exits 1")
+            except SystemExit as e:
+                assert e.code == 1, e.code
+        assert out.getvalue().strip().splitlines()[-1].endswith("error: the real reason"), out.getvalue()
+
+
+def test_a_remixed_export_reuses_the_hand_in_only_of_the_same_picture():
+    # A2: an export of an unchanged picture under a new sound reuses the last hand-in's share video and sheets; a picture
+    # drawn again, replaced, or a share copy changed since gets a fresh encode
+    import subprocess
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        pic = tmp / "f.main.film.picture.mp4"
+
+        def draw(colour):
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"testsrc2=s=128x72:r=30:d=2,hue=h={colour}", "-c:v", "libx264",
+                            "-pix_fmt", "yuv420p", str(pic)], check=True)
+            lean.picture_note(pic).write_text(json.dumps({"files": {}, "drawn": lean.drawn_record(pic)}), encoding="utf-8")   # as a draw writes it
+
+        def sound(name, hz):
+            wav = tmp / name
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"sine=f={hz}:d=2", "-ac", "2", "-ar", "48000", str(wav)], check=True)
+            return wav
+
+        def cut(n, wav):
+            c = tmp / "cuts" / f"f-cut{n}.mp4"
+            c.parent.mkdir(exist_ok=True)
+            lean.mux(pic, wav, c, tag601=True)
+            return c
+
+        def frames(f, sel):
+            return subprocess.run(["ffmpeg", "-v", "error", "-i", str(f), "-map", sel, "-f", "framemd5", "-"], capture_output=True, text=True).stdout
+
+        draw(0)
+        one = cut(1, sound("a.wav", 440))
+        lean.hand_in(one)
+        lean.note_hand_in(one, pic)
+        two = cut(2, sound("b.wav", 660))
+        got = lean.hand_in_again(two, pic)
+        assert got, "an unchanged picture's hand-in is reused"
+        share, sheets = got
+        fresh = tmp / "fresh" / two.name
+        fresh.parent.mkdir()
+        fresh.write_bytes(two.read_bytes())
+        fresh_share, fresh_sheets = lean.hand_in(fresh)
+        assert frames(share, "0:v:0") == frames(fresh_share, "0:v:0") and frames(share, "0:a:0") == frames(fresh_share, "0:a:0")
+        assert [p.read_bytes() for p in sheets] == [p.read_bytes() for p in fresh_sheets] and sheets
+        lean.note_hand_in(two, pic)
+        three = cut(3, sound("c.wav", 330))
+        one_share = one.with_name(one.stem + "-share.mp4")
+        draw(120)                                  # the picture drawn again: the note keeps no hand-in
+        assert lean.hand_in_again(three, pic) is None, "a picture drawn again gets a fresh encode"
+        lean.hand_in(three)
+        lean.note_hand_in(three, pic)
+        four = cut(4, sound("d.wav", 550))
+        three_share = three.with_name(three.stem + "-share.mp4")
+        three_share.write_bytes(one_share.read_bytes())      # the last share copy is no longer the one made
+        assert lean.hand_in_again(four, pic) is None, "a share copy changed since is not reused"
+        lean.hand_in(three)
+        lean.note_hand_in(three, pic)
+        pic.write_bytes(pic.read_bytes() + b"\0")             # something put at the picture's name, not drawn
+        assert lean.hand_in_again(four, pic) is None, "a picture not as drawn is not reused"
+        # a damaged note (no cut name, or a path where the name belongs) is made afresh, not a crash (a review's finding)
+        for name in ("", "sub/cut.mp4"):
+            note = {"drawn": lean.drawn_record(pic), "hand_in": {"cut": name, "drawn": lean.drawn_record(pic)}}
+            lean.picture_note(pic).write_text(json.dumps(note), encoding="utf-8")
+            assert lean.hand_in_again(four, pic) is None, f"a note naming the cut {name!r} is not reused"
 
 
 def test_look_says_what_happened_to_the_bundle():
@@ -392,6 +675,14 @@ def test_look_leaves_out_exposure_warnings_on_a_light_ground():
         Image.fromarray(a).save(light); Image.fromarray(b).save(dark)
         lit = look.light_frames([light, dark])
         ground = look.grounds([light, dark])
+        # B6: look decodes each still once and hands the pictures round; the grounds from them are the ones read from
+        # the files (RGB stills and a grey one, as Pillow reads each to grey with one matrix)
+        rgb = Path(tmp) / "frame-00002.png"
+        c = np.random.default_rng(2).integers(0, 256, (180, 320, 3), dtype=np.uint8)
+        Image.fromarray(c).save(rgb)
+        pngs = [light, dark, rgb]
+        decoded = {p: Image.open(p).convert("RGB") for p in pngs}
+        assert look.grounds(pngs, decoded) == look.grounds(pngs) and look.light_frames(pngs, decoded=decoded) == look.light_frames(pngs)
     assert list(lit) == ["frame-00000.png"] and lit["frame-00000.png"] > 0.9
     said = ["render warn: frame-00000.png: 30% of the pixels clip to white", "raea: warn exposure: frame-00000.png: +2.3 stops over mid grey: the frame reads washed out",
             "render warn: frame-00001.png: 31% of the pixels clip to white", "render warn: frame-00000.png: text overflows its box"]
@@ -1102,15 +1393,18 @@ def test_a_source_whose_name_starts_with_an_underscore_makes_the_picture_stale_a
     import time
     with tempfile.TemporaryDirectory() as tmp:
         d, _, _ = fake_film(tmp)
-        base = lean.sources_newest(d)
+        base = lean.source_files(d)
         later = time.time() + 600
         for name in lean.STUBS:
             (d / name).write_text("// a stub", encoding="utf-8")
             os.utime(d / name, (later, later))
-        assert lean.sources_newest(d) == base, "the tool's own stubs are not sources"
+        (d / "out").mkdir()
+        (d / "out" / "ignored.tsx").write_text("// in out", encoding="utf-8")
+        assert lean.source_files(d) == base, "the tool's own stubs and out/ are not sources"
         (d / "_scene.tsx").write_text("// imported by main.tsx", encoding="utf-8")
         os.utime(d / "_scene.tsx", (later, later))
-        assert lean.sources_newest(d) >= later - 1, "an edited _scene.tsx is newer than any picture drawn before it"
+        after = lean.source_files(d)
+        assert "_scene.tsx" in after and after["_scene.tsx"][0] >= later - 1, "an edited _scene.tsx is recorded in source_files"
         from unittest.mock import patch
         with patch.object(lean, "OUTROOT", Path(tmp) / "out"):
             try:
@@ -1150,6 +1444,7 @@ def test_a_preflight_check_that_times_out_has_not_passed():
 def test_vd_profile_reads_the_session_that_made_the_film():
     # the first profile printed hundreds of runs of another session, newer and naming the folder in a brief
     import os
+    import time
     from unittest.mock import patch
     with tempfile.TemporaryDirectory() as tmp:
         home, film = Path(tmp), Path(tmp) / "films" / "quiet"
@@ -1159,8 +1454,18 @@ def test_vd_profile_reads_the_session_that_made_the_film():
         maker.write_text(json.dumps({"cwd": str(film.parent), "message": {"content": [{"type": "tool_use", "input": {"command": "python vd.py new quiet --kind explainer"}}]}}) + "\n", encoding="utf-8")
         director.write_text(json.dumps({"message": {"content": f"make a film in {film.as_posix()}"}}) + "\n", encoding="utf-8")
         os.utime(maker, (1e9, time_now() - 100)); os.utime(director, (1e9, time_now()))
+        # A5: a newer session run in a folder named "New folder", every tool call a vd command, is read quickly: the
+        # film's folder was resolved again for each of its lines (7.6 s over 30,000)
+        decoy = proj / "decoy.jsonl"
+        tool = {"cwd": str(Path(tmp) / "New folder"), "message": {"content": [{"type": "tool_use", "input": {"command": "python vd.py look films/x"}}]}}
+        decoy.write_text((json.dumps(tool) + "\n") * 3000, encoding="utf-8")
+        os.utime(decoy, (1e9, time_now()))
         with patch.object(Path, "home", lambda: home):
+            t0 = time.perf_counter()
             assert lean.newest_transcript(film) == maker
+            took = time.perf_counter() - t0
+            assert took < 0.25, f"3,000 tool calls of another session took {took:.2f} s"
+            decoy.unlink()
             maker.unlink()
             assert lean.newest_transcript(film) == director, "with no session that made it, the newest that names it"
 
@@ -1289,20 +1594,28 @@ def test_a_film_that_names_a_shutter_is_exported_with_its_blur():
         d, rendered, render = fake_film(tmp)
         score = json.loads((d / "score.json").read_text(encoding="utf-8"))
         (d / "score.json").write_text(json.dumps({**score, "shutter": {"composition": "film-sub", "sub": 4, "open": 3}}), encoding="utf-8")
-        blurred = []
+        blurred, preflights = [], []
 
         def averaged(pictures, out, sub, opened, fps):
             blurred.append((Path(pictures).name, sub, opened, fps))
             Path(out).write_bytes(b"blurred")
-        with patch.object(lean, "OUTROOT", Path(tmp) / "out"), patch.object(lean, "raea_render", render), patch.object(lean, "must_preflight", lambda *a, **k: None), \
+        with patch.object(lean, "OUTROOT", Path(tmp) / "out"), patch.object(lean, "raea_render", render), \
+                patch.object(lean, "must_preflight", lambda entry, comp, f0, frames, fps: preflights.append((comp, f0, frames, fps))), \
                 patch.object(lean, "mux", lambda *a, **k: None), patch.object(lean, "hand_in", lambda dest: (dest, [])), patch.object(lean, "scanned", lambda film, to: to), \
                 patch.object(lean, "build_sound", lambda d, s: Path(lean.outdir(d) / "sound.wav").write_bytes(b"w")), patch.object(lean, "averaged", averaged):
             assert lean.cmd_export(Args(film=str(d))) == 0
+            total = int(round(score["duration"] * score["fps"]))
+            assert preflights == [("film-sub", 0, lean.spread(score, total=total * 4), score["fps"] * 4)], (
+                f"shutter export preflights the sub-frame composition at sub * total and sub * fps: {preflights}")
             out = Path(tmp) / "out" / "film"
             pics = list(out.glob("*.picture.mp4"))
             assert len(rendered) == 1 and "film-sub" in rendered[0][1], f"the engine drew the many-pictures composition, once: {rendered}"
             assert len(blurred) == 1 and blurred[0][1:] == (4, 3, 30), f"3 of every 4 averaged, at the film's own rate: {blurred}"
             assert len(pics) == 1 and pics[0].read_bytes() == b"blurred" and not list(out.glob("*.part.mp4")), "the kept picture is the blurred one, and nothing is left beside it"
+            (d / "score.json").write_text(json.dumps({**score, "shutter": {"composition": "film-sub-missing", "sub": 4, "open": 3}}), encoding="utf-8")
+            preflights.clear()
+            assert lean.cmd_export(Args(film=str(d), again=True)) == 0
+            assert preflights and preflights[0][0] == "film-sub-missing", preflights
             try:
                 lean.cmd_render(Args(film=str(d), from_="0", to="0.5"))
                 raise AssertionError("a stretch drawn alone would be sharp inside a blurred picture")
@@ -1365,21 +1678,24 @@ def test_a_folder_taking_over_a_name_does_not_inherit_the_other_films_latest_cut
             (o / "cuts").mkdir()
             for name, data in (("cuts/shared-cut1.mp4", b"cut1"), ("shared.mp4", b"cut1"), ("shared-share.mp4", b"s"),
                                ("shared-sheet_000.jpg", b"j"), ("shared-sheet.jpg", b"one sheet"), ("scan.txt", b"SCAN of one"), ("sound.txt", b"sound of one"),
-                               ("bridge/cues.json", b"{}"), ("evolve-1-KEY.txt", b"key")):
+                               ("bridge/cues.json", b"{}"), ("evolve-1-KEY.txt", b"key"), ("pack-1-KEY.txt", b"pack key")):
                 (o / name).parent.mkdir(parents=True, exist_ok=True)
                 (o / name).write_bytes(data)
             assert lean.outdir(b) == o
             left = sorted(p.relative_to(o).as_posix() for p in o.rglob("*") if p.is_file() and p.name not in (lean.OWNER, "exporting.lock"))
             # the scan and sound notes are readings and go; the rest of the other film's work is moved aside, not deleted
-            aside = ["bridge/cues.json", "cuts/shared-cut1.mp4", "evolve-1-KEY.txt", "shared-share.mp4", "shared-sheet.jpg", "shared-sheet_000.jpg", "shared.mp4"]
+            aside = ["bridge/cues.json", "cuts/shared-cut1.mp4", "evolve-1-KEY.txt", "pack-1-KEY.txt", "shared-share.mp4", "shared-sheet.jpg", "shared-sheet_000.jpg", "shared.mp4"]
             assert left == [f"earlier-folder/1/{x}" for x in aside], left
             # a third folder taking the name over keeps both earlier keys (broke: the second replaced the first's)
             (o / "evolve-1-KEY.txt").write_bytes(b"key two")
+            (o / "pack-1-KEY.txt").write_bytes(b"pack two")
             c = Path(tmp) / "three" / "shared"
             c.mkdir(parents=True)
             lean.outdir(c)
             assert (o / "earlier-folder" / "1" / "evolve-1-KEY.txt").read_bytes() == b"key"
             assert (o / "earlier-folder" / "2" / "evolve-1-KEY.txt").read_bytes() == b"key two"
+            assert (o / "earlier-folder" / "1" / "pack-1-KEY.txt").read_bytes() == b"pack key"
+            assert (o / "earlier-folder" / "2" / "pack-1-KEY.txt").read_bytes() == b"pack two"
 
 def test_the_scans_count_line_says_when_the_sound_is_missing_or_off_and_an_unscanned_export_is_not_a_clean_exit():
     # a review's finding: a film with no sound, or far off the level, ended "0 to fix and 0 to check"; and an export
@@ -1478,6 +1794,45 @@ def test_an_encode_that_lifts_the_peak_is_trimmed_within_the_level():
         gains.clear()
         said = lean.held_under_peak("pic.mp4", "s.wav", Path("part.mp4"))
     assert gains == [-0.25, -0.5, -0.75, -1.0, 0.0] and "more headroom" in said, (gains, said)
+
+
+def test_export_meters_the_encoded_mix_once_without_decoding_picture():
+    import contextlib
+    import io
+    import subprocess
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as tmp:
+        d, _, _ = fake_film(tmp)
+        (d / "media").mkdir()
+        tone_wav(d / "media" / "sound.wav", 440, 1.0, 0.15)
+        score = json.loads((d / "score.json").read_text(encoding="utf-8"))
+        score.update(duration=1.0, fps=30, sound_file="media/sound.wav")
+        (d / "score.json").write_text(json.dumps(score), encoding="utf-8")
+
+        def draw_pic(dd, entry, out, *flags, env=None):
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=0x202020:s=320x180:r=30:d=1",
+                            "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out)], check=True)
+            return True, 0.1, "OK 0.1s"
+
+        real_run, real_loudness = lean.run, lean.loudness
+        cmds, calls = [], []
+
+        def spy_run(args, **kw):
+            if any("ebur128" in str(x) for x in args):
+                cmds.append([str(x) for x in args])
+            return real_run(args, **kw)
+
+        def spy_loudness(path):
+            calls.append(Path(path).name)
+            return real_loudness(path)
+
+        with patch.object(lean, "OUTROOT", Path(tmp) / "out"), patch.object(lean, "raea_render", draw_pic), \
+                patch.object(lean, "must_preflight", lambda *a, **k: None), patch.object(lean, "hand_in", lambda dest: (dest, [])), \
+                patch.object(lean, "run", spy_run), patch.object(lean, "loudness", spy_loudness), contextlib.redirect_stdout(io.StringIO()):
+            lean._export(Args(film=str(d)))
+        assert cmds and all("-vn" in c for c in cmds), f"loudness skips video decoding with -vn: {cmds}"
+        assert len(calls) == 1, f"an untrimmed export meters its encoded mix once, not again in scan: {calls}"
+        assert "LUFS integrated" in (Path(tmp) / "out" / "film" / "scan.txt").read_text(encoding="utf-8")
 
 
 def test_a_stale_worked_film_sound_stops_the_export_with_the_command():
@@ -1667,9 +2022,48 @@ def test_look_says_each_kind_once_with_its_worst_cases_and_a_cut_first():
     assert "(and on 3 more tiles)" in shown[0], "a word seen on four tiles is one case"
     assert look.one_each(["render warn: frame-00001.png: 5% clip", "render warn: frame-00004.png: 5% clip", "other"]) == \
         ["render warn: frame-*.png: 5% clip  (on 2 stills)", "other"]
+    # Bb3: two moments that round to the same frame name both tiles in summary()
+    dup_note = look.Note("cut", 0.5, ("a.tsx:1", "Hello"), "clipped: text Hello")
+    dup_lines = look.summary({60: [dup_note]}, [60, 60], 60.0)
+    assert "tiles 1, 2:" in dup_lines[0] and "(and on 1 more tile)" in dup_lines[1], dup_lines
     import subprocess
     out = subprocess.run([sys.executable, "-X", "utf8", str(TOOLS / "vd.py"), "look", "--help"], capture_output=True, text=True, encoding="utf-8").stdout
     assert "--all" in out and "look-report.txt" in " ".join(out.split()), out
+    # Ab2+Ab4: film-look is chosen before must_preflight, trailing commas in --at are ignored, and bad --at words exit cleanly
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp) / "look-film"
+        d.mkdir()
+        (d / "main.tsx").write_text('const FILM_ID = "f"; export default <Composition id={`${FILM_ID}-look`} />;\n', encoding="utf-8")
+        (d / "score.json").write_text(json.dumps({"fps": 30, "duration": 10.0, "beats": [{"from": 0.0, "to": 10.0}]}), encoding="utf-8")
+        pre, ran = [], []
+        fake_stream = lambda cmd, **kw: ran.append(list(map(str, cmd))) or SimpleNamespace(returncode=0, stdout="LOOK ok\n", stderr="")
+        import raea_run
+        busy = [False]
+        with patch.object(lean, "OUTROOT", Path(tmp) / "out"), patch.object(lean, "room", lambda *a, **k: None), \
+                patch.object(lean, "must_preflight", lambda e, c, f0, fs, r: pre.append((c, f0, fs, r))), \
+                patch.object(lean, "streamed", fake_stream), patch.object(raea_run, "queue_free", lambda: not busy[0]):
+            # A1b: a page film's look with the queue free runs no preflight (look.py's own render refuses as quickly)
+            assert lean.main(["look", "--at", "2,9,", "--film", str(d)]) == 0
+            assert pre == [] and len(ran) == 1, f"a flat film with a free queue is drawn without the checks: {pre}"
+            busy[0] = True
+            assert lean.main(["look", "--at", "2,9,", "--film", str(d)]) == 0
+            assert pre == [("film-look", 60, [60, 270], 30)], f"preflight sees film-look and parsed frames: {pre}"
+            busy[0] = False
+            (d / "scene.tsx").write_text('import { Sphere } from "raea/3d";\n', encoding="utf-8")
+            assert lean.main(["look", "--at", "2,9,", "--film", str(d)]) == 0
+            assert len(pre) == 2, f"a film with 3D is checked first even when the queue is free: {pre}"
+            (d / "scene.tsx").unlink()
+            ran[:] = ran[1:]
+            assert "--composition" in ran[0] and ran[0][ran[0].index("--composition") + 1] == "film-look", ran[0]
+            assert ran[0][ran[0].index("--at") + 1] == "60,270", ran[0]
+            for bad_at in ("2,bad", ","):
+                try:
+                    lean.main(["look", "--at", bad_at, "--film", str(d)])
+                    raise AssertionError(f"bad --at {bad_at!r} should exit cleanly")
+                except SystemExit as e:
+                    assert "--at" in str(e), (bad_at, e)
 
 
 def test_pin_leaves_out_words_heard_in_music():
@@ -1897,6 +2291,107 @@ def test_the_blur_takes_its_turn_in_the_machines_queue():
         except SystemExit as e:
             assert "the blur failed" in str(e) and "no room" in str(e), e
         assert events == [("taken", "heavy"), "blur", "let go"], f"the queue is let go when the blur fails too: {events}"
+
+
+def test_worked_film_sound_cache_restores_every_output_and_invalidates_on_any_input():
+    # C4: repeated `vd new --like` under one VD_OUT reuses sound.py's outputs (including onoma's kit/waves.gen.ts),
+    # sets fresh mtimes so own_sound never stops on a cached file, and invalidates when sound.py, score.json,
+    # media/sounds/* or the ffmpeg version changes
+    import io
+    import os
+    import time
+    from contextlib import redirect_stdout
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "out"
+        real_run = lean.run
+        sound_runs = []
+
+        def spy_run(args, **kw):
+            if [str(x) for x in args[-2:]] == ["utf8", "sound.py"]:
+                sound_runs.append(Path(kw["cwd"]).name)
+            return real_run(args, **kw)
+
+        with patch.object(lean, "OUTROOT", out), patch.object(lean, "run", spy_run), redirect_stdout(io.StringIO()):
+            lean.main(["new", str(Path(tmp) / "onoma_cold"), "--like", "onoma"])
+            lean.main(["new", str(Path(tmp) / "onoma_warm"), "--like", "onoma"])
+        assert sound_runs == ["onoma_cold"], f"the second copy under one OUTROOT reuses cached sound.py outputs: {sound_runs}"
+        cold, warm = Path(tmp) / "onoma_cold", Path(tmp) / "onoma_warm"
+        for rel in ("media/sound.wav", "kit/times.gen.ts", "kit/waves.gen.ts", "score.json"):
+            assert (warm / rel).read_bytes() == (cold / rel).read_bytes(), f"{rel} differs between cold and cached copy"
+        assert lean.own_sound(warm, lean.score_of(warm)) == warm / "media" / "sound.wav"
+        with patch.object(lean, "OUTROOT", out):
+            code, clean_said = _clean("--orphans")
+            assert code == 0 and ".worked-sound" not in clean_said, clean_said
+            assert _refused(".worked-sound", "--yes")
+
+        films = Path(tmp) / "films"
+        mini = films / "mini"
+        (mini / "kit").mkdir(parents=True)
+        (mini / "media" / "sounds" / "inst").mkdir(parents=True)
+        (mini / "film.tsx").write_text("export const Film = () => null;\n", encoding="utf-8")
+        (mini / "score.json").write_text(json.dumps({"fps": 30, "width": 64, "height": 36, "duration": 1.0, "bpm": 120, "beats": [], "sounds": []}), encoding="utf-8")
+        (mini / "media" / "sounds" / "inst" / "c4.bin").write_bytes(b"sample-v1")
+        (mini / "kit" / "times.gen.ts").write_text("// old\n", encoding="utf-8")
+        (mini / "kit" / "waves.gen.ts").write_text("// old\n", encoding="utf-8")
+        (mini / "sound.py").write_text(
+            "from pathlib import Path\n"
+            "tag = Path('media/sounds/inst/c4.bin').read_bytes().decode()\n"
+            "(Path('media') / 'sound.wav').write_bytes(b'RIFF' + tag.encode())\n"
+            "(Path('kit') / 'times.gen.ts').write_text(f'export const TAG = {tag!r};\\n', encoding='utf-8')\n"
+            "(Path('kit') / 'waves.gen.ts').write_text(f'export const WAVES = {tag!r};\\n', encoding='utf-8')\n"
+            "print('mini sound ready')\n",
+            encoding="utf-8",
+        )
+        old_t = time.time() - 120
+        for g in (mini / "kit" / "times.gen.ts", mini / "kit" / "waves.gen.ts"):
+            os.utime(g, (old_t, old_t))
+        os.utime(mini / "sound.py", (old_t + 60, old_t + 60))
+        sound_runs.clear()
+        ff_ver = ["ffmpeg version 7.1-fake"]
+        n = 0
+
+        def copy_mini():
+            nonlocal n
+            n += 1
+            dest = Path(tmp) / f"m_{n}"
+            with patch.object(lean, "OUTROOT", out), patch.object(lean, "FILMS", films), patch.object(lean, "run", spy_run), \
+                    patch.object(lean, "ffmpeg_version", lambda: ff_ver[0]), redirect_stdout(io.StringIO()):
+                lean.main(["new", str(dest), "--like", "mini"])
+            assert lean.own_sound(dest, lean.score_of(dest)) == dest / "media" / "sound.wav"
+            assert (dest / "kit" / "times.gen.ts").stat().st_mtime >= (dest / "sound.py").stat().st_mtime
+            assert (dest / "kit" / "waves.gen.ts").stat().st_mtime >= (dest / "sound.py").stat().st_mtime
+            return dest
+
+        d1 = copy_mini()
+        d2 = copy_mini()
+        assert len(sound_runs) == 1 and "sample-v1" in (d2 / "kit" / "waves.gen.ts").read_text(encoding="utf-8")
+        (mini / "media" / "sounds" / "inst" / "c4.bin").write_bytes(b"sample-v2")
+        d3 = copy_mini()
+        assert len(sound_runs) == 2 and "sample-v2" in (d3 / "kit" / "waves.gen.ts").read_text(encoding="utf-8")
+        copy_mini()
+        assert len(sound_runs) == 2
+        (mini / "score.json").write_text(json.dumps({"fps": 30, "width": 64, "height": 36, "duration": 1.0, "bpm": 100, "beats": [], "sounds": []}), encoding="utf-8")
+        copy_mini()
+        assert len(sound_runs) == 3
+        (mini / "sound.py").write_text((mini / "sound.py").read_text(encoding="utf-8") + "# changed\n", encoding="utf-8")
+        copy_mini()
+        assert len(sound_runs) == 4
+        ff_ver[0] = "ffmpeg version 8.0-fake"
+        copy_mini()
+        assert len(sound_runs) == 5
+        copy_mini()
+        assert len(sound_runs) == 5
+        with patch.object(np, "__version__", "99.0-fake"):
+            copy_mini()
+            assert len(sound_runs) == 6
+            copy_mini()
+            assert len(sound_runs) == 6
+        with patch.object(lean.sys, "version_info", (3, 99, 0)):
+            copy_mini()
+            assert len(sound_runs) == 7
+            copy_mini()
+            assert len(sound_runs) == 7
 
 
 if __name__ == "__main__":

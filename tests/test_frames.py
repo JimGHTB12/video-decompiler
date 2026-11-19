@@ -128,8 +128,42 @@ def test_blur_averages_the_open_shutter(tmp):
     assert abs(left - picture40) <= 2, f"frame 10 is pictures 40 and 41: its left edge is where picture 40's is ({picture40:.0f}), got {left:.0f}"
 
 
+def test_an_even_sample_reads_no_frame_times(tmp):
+    # D8: sheet.py --fps stamps each tile from its own clock, so it reads no packet times (it read them, and asked
+    # whether the film was variable-rate, on every vd export's hand-in sheet)
+    import argparse
+    from unittest.mock import patch
+    import sheet
+    clip = tmp / "box.mp4"
+    moving_box(clip, "n*4")
+    asked = []
+    a = argparse.Namespace(video=str(clip), out=str(tmp / "even.jpg"), start=0.0, end=None, fps=4, cols=4, rows=2, width=160, frame_times=None)
+    with patch.object(sheet, "frame_times", lambda *x, **k: asked.append("frame_times")),             patch.object(sheet, "variable_rate", lambda *x, **k: asked.append("variable_rate")):
+        sheet.every_frame(a, 640, 360, 30.0, 2.0, quiet=False)
+    assert not asked and (tmp / "even.jpg").exists(), asked
+
+
+def test_every_in_batches_lands_where_one_seek_a_tile_did(tmp):
+    # D1: sheet.py --every fetches its tiles in batches of 48 from one seek each; each must be the very frame one
+    # `-ss t` call returned (the first at or after t), here on a variable-rate file whose clock starts at 2.5 s (a frame
+    # time then comes out a hair under t: 2.8 - 2.5), across three batches, and with times past the end left out
+    sys.path.insert(0, str(ROOT / "tests"))
+    import awkward
+    import sheet
+    clip = awkward.vfr_late(tmp)
+    w, h, _, dur = sheet.probe(str(clip))
+    times = [round(k * 0.02, 3) for k in range(int(dur / 0.02) + 1)] + [dur + 0.5]
+    got = dict(sheet.every_still(str(clip), times, 128, w, h))
+    assert len(times) > 2 * sheet.BATCH and dur + 0.5 not in got, (len(times), sorted(got)[-3:])
+    for t in times:
+        one = sheet.one_still(str(clip), t, 128)
+        assert (one is None) == (t not in got), t
+        assert one is None or np.array_equal(np.asarray(one), np.asarray(got[t])), (t, awkward.number(np.asarray(one)), awkward.number(np.asarray(got[t])))
+
+
 def main():
-    tests = [test_variable_rate_stamps, test_every_frame_once, test_a_held_frame_shows, test_long_stretch_splits_and_old_use_still_works, test_blur_averages_the_open_shutter]
+    tests = [test_variable_rate_stamps, test_every_frame_once, test_a_held_frame_shows, test_long_stretch_splits_and_old_use_still_works, test_blur_averages_the_open_shutter,
+             test_an_even_sample_reads_no_frame_times, test_every_in_batches_lands_where_one_seek_a_tile_did]
     for t in tests:
         with tempfile.TemporaryDirectory() as tmp:
             t(Path(tmp))
