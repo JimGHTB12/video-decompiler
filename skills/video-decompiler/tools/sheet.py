@@ -7,7 +7,8 @@
   python sheet.py FOLDER -o stills.jpg [--labels 12,40,96] [--cols 4] [--width 480]
 
 --every is seconds between frames, one frame looked up at a time: fine for a glance.
---native is every frame of the source, exactly once, in one pass, each stamped with its frame number and time.
+--native is every frame of the window, sought half way before its first frame (film_diff.seek_frame, so rounding never
+lands a frame late) and stopped after its last, each stamped with its frame number and time.
 --fps is an even sample of the whole film, for the overview.
 A FOLDER of stills (the frames a render wrote with --at) becomes one sheet in file-name order, each stamped with its
 label, or its file name when no labels are given: twenty frames looked at in one glance.
@@ -21,9 +22,12 @@ With --native or --fps a long stretch is split across several files (NAME_000.jp
 tiles each, and each file is printed.
 
 --native stamps each frame with its own time from the file, so a variable-rate video (a screen recording, often) reads
-true. Frame number over frame rate stamped 3.00 s on a frame shown at 4.00 s.
+true. Frame number over frame rate stamped 3.00 s on a frame shown at 4.00 s. Because --native decodes only the stretch
+asked for, damage outside that stretch no longer fails a standalone --native sheet (scan.windows still checks the whole
+film first when vd pack builds motion sheets).
 """
 import argparse
+import functools
 import io
 import subprocess
 import sys
@@ -33,7 +37,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from film_diff import NO_WINDOW, check_window, ffprobe, fps_of, frame_times, variable_rate  # noqa: E402
+from film_diff import NO_WINDOW, check_window, ffprobe, fps_of, frame_times, seek_frame, shown_index, variable_rate  # noqa: E402
 
 MAX_FRAMES = 240
 
@@ -43,17 +47,18 @@ def probe(video):
     return raw["w"], raw["h"], fps_of(raw, "r_frame_rate"), raw["duration"]
 
 
-def strip_font():
-    """The stamp's face: a 13 px bold where the system has one, else Pillow's own at 13 px (Pillow 10.1 and later), else
-    its small bitmap face."""
+@functools.lru_cache(maxsize=8)
+def strip_font(size=13):
+    """The stamp's face: a bold at `size` px where the system has one, else Pillow's own at `size` px (Pillow 10.1 and
+    later), else its small bitmap face. Cached by size across every tile and sheet."""
     from PIL import ImageFont
     for face in ("arialbd.ttf", "Arial Bold.ttf", "DejaVuSans-Bold.ttf"):
         try:
-            return ImageFont.truetype(face, 13)
+            return ImageFont.truetype(face, size)
         except OSError:
             pass
     try:
-        return ImageFont.load_default(13)
+        return ImageFont.load_default(size)
     except TypeError:
         return ImageFont.load_default()
 
@@ -110,7 +115,10 @@ def folder(a):
     print(f"{len(tiles)} stills -> {a.out}")
 
 
-def every_frame(a, src_w, src_h, rate, duration):
+_UNSET = object()
+
+
+def every_frame(a, src_w, src_h, rate, duration, times=_UNSET, quiet=False):
     """One decode pass: every frame of the window (--native) or an even sample of it (--fps)."""
     end = min(a.end if a.end is not None else duration, duration)
     h = int(round(a.width * src_h / src_w / 2) * 2)
@@ -118,17 +126,37 @@ def every_frame(a, src_w, src_h, rate, duration):
     step = 1.0 / rate
     if a.fps:
         vf, step = f"fps={a.fps}," + vf, 1.0 / a.fps
-    # every frame's own time, so a stamp is true when frames don't come at one rate; a regular clock when the file has none
-    times = frame_times(a.video)
-    times = np.arange(int(duration * rate) + 2) / rate if times is None else times
-    first = int(np.searchsorted(times, a.start - 1e-6))    # the first source frame at or after --from
-    if a.fps:
+        # an even sample is stamped by its own clock (from + n / fps): no frame's packet time is read (D8)
         cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", f"{a.start:.4f}", "-to", f"{end:.4f}", "-i", a.video, "-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+        times = first = last = None
     else:
-        # by frame number, not by seeking: a seek can land a frame late, and then every stamp on the sheet is wrong
+        # every frame's own time, so a stamp is true when frames don't come at one rate; a regular clock when the file has none
+        if times is _UNSET:
+            if getattr(a, "frame_times", None):
+                loaded = np.load(a.frame_times)
+                times = None if len(loaded) == 0 else loaded
+            else:
+                times = frame_times(a.video)
+        # only the file's own packet times say where a seek lands: with an estimated clock (a raw H.264 stream has no packet
+        # times and no seek index) frames are picked by number from a decode from the start (an R2 review's finding)
+        # and packets before 0 (preroll) are never shown, so where there are any the frames are picked the same way
+        seekable = times is not None and bool(times[0] >= 0)
+        times = np.arange(int(duration * rate) + 2) / rate if times is None else times
+        first = int(np.searchsorted(times, a.start - 1e-6))    # the first source frame at or after --from
+        first = max(first, int(np.count_nonzero(times < 0)))   # a preroll packet is never shown: the window starts at the first shown
+        # seek half way before `first` (seek_frame): a plain -ss rounded past `first` landed a frame late and shifted stamps
+        if first >= len(times):
+            raise SystemExit("no frames in that window")
         last = max(first, int(np.searchsorted(times, end - 1e-6)) - 1)
-        comma = chr(92) + ","
-        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", a.video, "-vf", f"select='between(n{comma}{first}{comma}{last})'," + vf, "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+        count = last - first + 1
+        # setpts=N/TB gives rawvideo monotonic frame numbers after a seek on 1 ms-timebase WebM files (frames stay 1-to-1)
+        if seekable:
+            cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", f"{seek_frame(times, first):.6f}", "-i", str(a.video),
+                   "-vf", f"{vf},setpts=N/TB", "-fps_mode", "passthrough", "-frames:v", str(count), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+        else:
+            a0, b0 = shown_index(times, first), shown_index(times, last)    # packet numbers as the decode counts its pictures
+            cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(a.video), "-vf", f"select='between(n\\,{a0}\\,{b0})',{vf},setpts=N/TB",
+                   "-fps_mode", "passthrough", "-frames:v", str(count), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
     import decode
     size, per = a.width * h * 3, a.cols * a.rows
     out = Path(a.out)
@@ -161,10 +189,57 @@ def every_frame(a, src_w, src_h, rate, duration):
     if len(files) == 1:                                     # one sheet keeps the name it was asked for
         files[0].replace(out)
         files[0] = out
-    for f in files:
-        print(f)
-    pace = "at a variable rate, each stamped with its own time" if variable_rate(times) else f"{rate:g} a second"
-    print(f"{n} frames -> {len(files)} sheet{'s' if len(files) > 1 else ''}" + ("" if a.fps else f" (every frame, {pace})"))
+    if not quiet:
+        for f in files:
+            print(f)
+        pace = None if a.fps else "at a variable rate, each stamped with its own time" if variable_rate(times) else f"{rate:g} a second"
+        print(f"{n} frames -> {len(files)} sheet{'s' if len(files) > 1 else ''}" + ("" if a.fps else f" (every frame, {pace})"))
+
+
+def native_stretch(video, out, start, end, cols=6, rows=8, width=320, probed=None, times=_UNSET):
+    """Write one --native stretch in-process without starting a new Python interpreter (pack.py)."""
+    src_w, src_h, rate, duration = probed or probe(str(video))
+    check_window(start, end, duration, str(video))
+    tile_h = int(round(width * src_h / src_w / 2) * 2)
+    sane(cols, rows, width, tile_h)
+    a = argparse.Namespace(video=str(video), out=str(out), start=start, end=end, fps=None, cols=cols, rows=rows, width=width, frame_times=None)
+    every_frame(a, src_w, src_h, rate, duration, times=times, quiet=True)
+
+
+BATCH = 48   # stills per ffmpeg call: under ffmpeg's select parser limit and Windows's command line (as measure.BATCH)
+
+
+def one_still(video, t, width):
+    """The picture `-ss t` lands on, as one ffmpeg call made it: the first frame at or after t, scaled to width."""
+    p = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", f"{t:.3f}", "-i", video, "-frames:v", "1", "-vf", f"scale={width}:-2",
+                        "-f", "image2pipe", "-vcodec", "png", "-"], capture_output=True, creationflags=NO_WINDOW)
+    return Image.open(io.BytesIO(p.stdout)).convert("RGB") if p.stdout else None
+
+
+def every_still(video, times, width, src_w, src_h):
+    """[(t, picture)] for --every: for each time the frame one `-ss t` call returned (the first frame at or after t,
+    read from the file's packet times), fetched in batches of BATCH from one seek each instead of one ffmpeg a tile.
+    A time past the last frame gives nothing, as before. A file that can't be sought by frame (packet_clock) keeps one
+    call a still."""
+    from film_diff import packet_clock, seek_frame
+    clock, seekable = packet_clock(video)
+    if not seekable:
+        return [(t, im) for t in times for im in [one_still(video, t, width)] if im is not None]
+    # the height scale=W:-2 gives: the source's shape at this width, rounded to the nearest even number as ffmpeg rounds
+    h = (width * src_h + src_w) // (2 * src_w) * 2
+    # the first frame at or after t, as ffmpeg finds it in whole ticks; a frame time here is its packet time less the
+    # file's start, which can come out a hair under t (2.8 - 2.5 = 0.29999999999999982), so a millionth is allowed: a real
+    # frame before t is at least one tick (1/90000 s or more) earlier
+    want = [int(np.searchsorted(clock, round(t, 3) - 1e-6, side="left")) for t in times]
+    frames, got, size = sorted({f for f in want if f < len(clock)}), {}, width * h * 3
+    for b in range(0, len(frames), BATCH):
+        part = frames[b:b + BATCH]
+        pick = "+".join(f"eq(n\\,{f - part[0]})" for f in part)
+        p = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", f"{seek_frame(clock, part[0]):.6f}", "-i", video,
+                            "-vf", f"select='{pick}',scale={width}:{h}", "-fps_mode", "passthrough", "-frames:v", str(len(part)),
+                            "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, creationflags=NO_WINDOW)
+        got.update({f: Image.frombytes("RGB", (width, h), p.stdout[k * size:(k + 1) * size]) for k, f in enumerate(part) if (k + 1) * size <= len(p.stdout)})
+    return [(t, got[f]) for t, f in zip(times, want) if f in got]
 
 
 def main():
@@ -180,6 +255,7 @@ def main():
     ap.add_argument("--rows", type=int, default=8, help="rows on each sheet with --native or --fps")
     ap.add_argument("--width", type=int, default=320)
     ap.add_argument("--labels", help="for a folder of stills: one label a picture, separated by commas")
+    ap.add_argument("--frame-times", help=argparse.SUPPRESS)  # pre-read packet times from pack.py, so one pack reads them once
     a = ap.parse_args()
     if Path(a.video).is_dir():
         return folder(a)
@@ -205,11 +281,8 @@ def main():
     if len(times) == MAX_FRAMES:
         print(f"capped at {MAX_FRAMES} frames: use a shorter window, a larger --every, or --native, which has no cap")
     tiles = []
-    for t in times:
-        p = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", f"{t:.3f}", "-i", a.video, "-frames:v", "1", "-vf", f"scale={a.width}:-2", "-f", "image2pipe", "-vcodec", "png", "-"], capture_output=True, creationflags=NO_WINDOW)
-        if not p.stdout:
-            continue
-        tiles.append(stamp(Image.open(io.BytesIO(p.stdout)).convert("RGB"), f"{t:6.2f}s"))
+    for t, im in every_still(a.video, times, a.width, src_w, src_h):
+        tiles.append(stamp(im, f"{t:6.2f}s"))
     if not tiles:
         raise SystemExit("no frames in that window")
     board(tiles, a.cols, a.out)

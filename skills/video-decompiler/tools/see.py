@@ -52,8 +52,12 @@ NEAR_REPEAT = 0.25  # mean grey change below this, with almost no pixel changing
 MAX_HOLD = 0.4      # seconds: a held picture longer than this is a rest, not a step in a cadence
 
 
+# see's own hue tables and weight order, kept apart from timecheck.hue_shift on purpose: the two round differently in
+# float32 (the table as * pi / 90 against * (2 pi / 180), the weight as (s * v) / 255 against s * (v / 255)), and
+# through timecheck's a 6.000001-degree change read as 5.9999996 and a colour event at the 6-degree line was lost (a
+# review's finding). Merging them changes what one of the two tools reports.
 _HUE_COS, _HUE_SIN = np.cos(np.arange(180, dtype=np.float32) * np.pi / 90), np.sin(np.arange(180, dtype=np.float32) * np.pi / 90)
-Reg = namedtuple("Reg", "x0 y0 x1 y1 area vx vy coh b g r fill kind change ink0 ink1")
+Reg = namedtuple("Reg", "x0 y0 x1 y1 area vx vy coh b g r kind change ink0 ink1")
 
 
 def fit_size(w, h, edge):
@@ -165,12 +169,14 @@ def join_primitives(prims, w, h):
     def gap(a, b):
         return max(0, max(a[0], b[0]) - min(a[2], b[2])), max(0, max(a[1], b[1]) - min(a[3], b[3]))
 
+    speeds = [math.hypot(p[5], p[6]) for p in prims]
     for i in range(n):
         a = prims[i]
         for j in range(i + 1, n):
+            if find(i) == find(j):
+                continue            # one thing already: joining them again changes nothing
             b = prims[j]
-            sa, sb = math.hypot(a[5], a[6]), math.hypot(b[5], b[6])
-            s = max(sa, sb)
+            s = max(speeds[i], speeds[j])
             if math.hypot(a[5] - b[5], a[6] - b[6]) > max(0.7, 0.5 * s):
                 continue
             gx, gy = gap(a, b)
@@ -182,10 +188,12 @@ def join_primitives(prims, w, h):
             mean_x, mean_y = (a[5] + b[5]) / 2, (a[6] + b[6]) / 2
             mean_len = math.hypot(mean_x, mean_y) + 1e-9
             ux, uy = mean_x / mean_len, mean_y / mean_len
-            perp = lambda box: sorted(abs(-uy * x + ux * y) for x in (box[0], box[2]) for y in (box[1], box[3]))
-            pa, pb = perp(a), perp(b)
-            lap = min(pa[-1], pb[-1]) - max(pa[0], pb[0])
-            short = min(pa[-1] - pa[0], pb[-1] - pb[0])
+            # each box's extent across the motion: the least and greatest of its four corners
+            pa = [abs(-uy * x + ux * y) for x in (a[0], a[2]) for y in (a[1], a[3])]
+            pb = [abs(-uy * x + ux * y) for x in (b[0], b[2]) for y in (b[1], b[3])]
+            lo_a, hi_a, lo_b, hi_b = min(pa), max(pa), min(pb), max(pb)
+            lap = min(hi_a, hi_b) - max(lo_a, lo_b)
+            short = min(hi_a - lo_a, hi_b - lo_b)
             ca, cb = ((a[0] + a[2]) / 2, (a[1] + a[3]) / 2), ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)
             dist = math.hypot(ca[0] - cb[0], ca[1] - cb[1])
             if short > 0 and lap >= 0.6 * short and dist > 0 and abs((ca[0] - cb[0]) * ux + (ca[1] - cb[1]) * uy) / dist > 0.7:
@@ -244,6 +252,27 @@ def _join_radial(groups, w, h):
     return out
 
 
+_ROUND5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+
+
+def _u8_median(a):
+    """np.median of a uint8 array, from its 256 counts: the middle value, or the mean of the middle two"""
+    below = np.cumsum(np.bincount(a.ravel(), minlength=256))
+    half = a.size // 2
+    upper = int(np.searchsorted(below, half, side="right"))          # the value at sorted position `half`
+    return float(upper) if a.size % 2 else (int(np.searchsorted(below, half - 1, side="right")) + upper) / 2
+
+
+def _median(a):
+    """np.median of a 1-D float32 array: the middle value, or the middle two's mean worked out in float32 as np.median
+    does, without its general machinery (it ran 80 times a frame)"""
+    half = a.size // 2
+    if a.size % 2:
+        return float(np.partition(a, half)[half])
+    part = np.partition(a, (half - 1, half))
+    return float((part[half - 1] + part[half]) / np.float32(2))
+
+
 def regions_in(prev, cur, cur_bgr, flow, M, X, Y, ground, hot):
     """The moving and changing regions between two frames, with the camera's motion taken out."""
     h, w = cur.shape
@@ -254,20 +283,21 @@ def regions_in(prev, cur, cur_bgr, flow, M, X, Y, ground, hot):
         ru, rv = flow[..., 0] - gx.astype(np.float32), flow[..., 1] - gy.astype(np.float32)
     else:
         ru, rv = flow[..., 0], flow[..., 1]
-    signed = cur.astype(np.int16) - warped.astype(np.int16)
-    d = np.abs(signed).astype(np.float32)
-    tau = max(6.0, 4.0 * (float(np.median(d)) * 1.5 + 0.5))
+    d8 = cv2.absdiff(cur, warped)
+    tau = max(6.0, 4.0 * (_u8_median(d8) * 1.5 + 0.5))
+    d = d8.astype(np.float32)
     mag = cv2.magnitude(ru, rv)
     changed = d > tau
     scattered = scatter_stats(changed, d, tau, ru, rv, w, h)
     moving = changed & (mag > 0.25)
     if hot is not None and hot.any():
         moving |= hot & (d > 0.6 * tau) & (mag > 0.06)   # where something was just moving, follow it down to a crawl
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     prims = []
-    closed = cv2.morphologyEx(moving.astype(np.uint8), cv2.MORPH_CLOSE, kernel)
-    count, labels, stats, _ = cv2.connectedComponentsWithStats(closed, connectivity=8)
-    order = np.argsort(-stats[1:, cv2.CC_STAT_AREA])[:40] + 1 if count > 1 else []
+    order = []
+    if moving.any():
+        closed = cv2.morphologyEx(moving.astype(np.uint8), cv2.MORPH_CLOSE, _ROUND5)
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(closed, connectivity=8)
+        order = np.argsort(-stats[1:, cv2.CC_STAT_AREA])[:40] + 1 if count > 1 else []
     for k in order:
         x, y, bw, bh, area = stats[k]
         if area < 10:
@@ -276,19 +306,20 @@ def regions_in(prev, cur, cur_bgr, flow, M, X, Y, ground, hot):
         if core.sum() < 6:
             continue
         u, v = ru[y:y + bh, x:x + bw][core], rv[y:y + bh, x:x + bw][core]
-        vx, vy = float(np.median(u)), float(np.median(v))
+        vx, vy = _median(u), _median(v)
         coh = float(np.mean(np.hypot(u - vx, v - vy) <= max(0.7, 0.4 * math.hypot(vx, vy))))
         prims.append([int(x), int(y), int(x + bw), int(y + bh), int(core.sum()), vx, vy, coh])
     out = []
+    ground16 = np.asarray(ground, dtype=np.int16)
     for g in (join_primitives(prims, w, h) if prims else []):
         crop = cur_bgr[g[1]:g[3], g[0]:g[2]].astype(np.int16)
-        ink = np.abs(crop - ground).max(axis=2) > 30
+        ink = np.abs(crop - ground16).max(axis=2) > 30
         colour = np.median(crop[ink], axis=0) if ink.sum() >= 4 else np.median(crop.reshape(-1, 3), axis=0)
-        out.append(Reg(*g[:8], int(colour[0]), int(colour[1]), int(colour[2]), float(ink.mean()), 0, 0.0, 0.0, 0.0))
+        out.append(Reg(*g[:8], int(colour[0]), int(colour[1]), int(colour[2]), 0, 0.0, 0.0, 0.0))
     # what changed without moving: something fading, popping on or off, or flickering in place
     still_change = (changed & ~(mag > 0.25)).astype(np.uint8)
-    if still_change.mean() < 0.6:
-        closed = cv2.morphologyEx(still_change, cv2.MORPH_CLOSE, kernel)
+    if still_change.mean() < 0.6 and still_change.any():
+        closed = cv2.morphologyEx(still_change, cv2.MORPH_CLOSE, _ROUND5)
         count, labels, stats, _ = cv2.connectedComponentsWithStats(closed, connectivity=8)
         order = np.argsort(-stats[1:, cv2.CC_STAT_AREA])[:8] + 1 if count > 1 else []
         for k in order:
@@ -296,10 +327,10 @@ def regions_in(prev, cur, cur_bgr, flow, M, X, Y, ground, hot):
             if area < 40:
                 break
             part = labels[y:y + bh, x:x + bw] == k
-            mean_change = float(signed[y:y + bh, x:x + bw][part].mean())
+            mean_change = float((cur[y:y + bh, x:x + bw].astype(np.int16) - warped[y:y + bh, x:x + bw].astype(np.int16))[part].mean())
             before = np.abs(prev[y:y + bh, x:x + bw].astype(np.int16) - _grey(ground))[part] > 30
             after = np.abs(cur[y:y + bh, x:x + bw].astype(np.int16) - _grey(ground))[part] > 30
-            out.append(Reg(int(x), int(y), int(x + bw), int(y + bh), int(area), 0.0, 0.0, 1.0, 0, 0, 0, 0.0, 1, mean_change, float(before.mean()), float(after.mean())))
+            out.append(Reg(int(x), int(y), int(x + bw), int(y + bh), int(area), 0.0, 0.0, 1.0, 0, 0, 0, 1, mean_change, float(before.mean()), float(after.mean())))
     return out, scattered
 
 
@@ -316,9 +347,15 @@ def scatter_stats(changed, d, tau, ru, rv, w, h):
     if count <= 1:
         return NO_SCATTER
     areas = stats[1:, cv2.CC_STAT_AREA]
-    strength = np.bincount(labels.ravel(), d.ravel(), count)[1:] / np.maximum(areas, 1)
-    u = np.bincount(labels.ravel(), ru.ravel(), count)[1:] / np.maximum(areas, 1)
-    v = np.bincount(labels.ravel(), rv.ravel(), count)[1:] / np.maximum(areas, 1)
+    if not ((areas >= 3) & (areas <= max(30, 0.0015 * w * h))).any():
+        return NO_SCATTER          # no patch of a size that can count: nothing below can make one
+    # sums over the changed pixels only (label 0, the unchanged, was summed and thrown away); each label's pixels are
+    # added in the same order, so every sum is the same number
+    on = labels.ravel() > 0
+    lab = labels.ravel()[on]
+    strength = np.bincount(lab, d.ravel()[on], count)[1:] / np.maximum(areas, 1)
+    u = np.bincount(lab, ru.ravel()[on], count)[1:] / np.maximum(areas, 1)
+    v = np.bincount(lab, rv.ravel()[on], count)[1:] / np.maximum(areas, 1)
     # something faint counts if it is really travelling; something staying put has to change strongly to tell it from shimmer
     small = (areas >= 3) & (areas <= max(30, 0.0015 * w * h)) & ((strength >= 2.5 * tau) | ((strength >= 1.5 * tau) & (np.hypot(u, v) > 0.25)))
     n = int(small.sum())
@@ -365,9 +402,9 @@ def scan(path, info, tmp):
     tw, th = fit_size(info["w"], info["h"], THUMB_EDGE)
     dec = Decoder(path, dw, dh, step, info["duration"])
     dis = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_MEDIUM)
-    X, Y = np.meshgrid(np.arange(aw, dtype=np.float32), np.arange(ah, dtype=np.float32))
-    prev = prev_lab = hot = None
-    rows = {k: [] for k in ("e", "repeat", "near", "detail", "luma", "L", "a", "b", "dL", "da", "db", "spread", "hue", "hue_coh", "sat")}
+    X, Y = np.arange(aw, dtype=np.float32)[None, :], np.arange(ah, dtype=np.float32)[:, None]   # a row and a column: they broadcast to the grid
+    prev = hot = None
+    rows = {k: [] for k in ("e", "repeat", "near", "detail", "hue", "hue_coh", "sat")}
     prev_hsv = None
     cams, regs, scatter = [], [], []
     thumb_path, colour_path = Path(tmp) / "thumbs.bin", Path(tmp) / "colour.bin"
@@ -381,11 +418,6 @@ def scan(path, info, tmp):
             thumbs.write(cv2.resize(grey, (tw, th), interpolation=cv2.INTER_AREA).tobytes())
             blocks = cv2.cvtColor(cv2.resize(small, (32, 18), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2LAB)
             colours.write(cv2.resize(blocks, (16, 9), interpolation=cv2.INTER_AREA).tobytes())
-            lab = blocks.astype(np.float32).reshape(-1, 3)
-            lab[:, 0] /= 2.55     # OpenCV stores L as 0-255
-            rows["luma"].append(float(grey.mean()))
-            mean_lab = lab.mean(axis=0)
-            rows["L"].append(float(mean_lab[0])); rows["a"].append(float(mean_lab[1])); rows["b"].append(float(mean_lab[2]))
             hsv = cv2.cvtColor(cv2.resize(small, (160, 90), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2HSV)
             if prev_hsv is None:
                 rows["hue"].append(0.0); rows["hue_coh"].append(0.0); rows["sat"].append(0.0)
@@ -401,7 +433,7 @@ def scan(path, info, tmp):
                     rows["hue"].append(0.0); rows["hue_coh"].append(0.0)
             prev_hsv = hsv
             if prev is None:
-                rows["e"].append(0.0); rows["repeat"].append(0.0); rows["near"].append(0.0); rows["dL"].append(0.0); rows["da"].append(0.0); rows["db"].append(0.0); rows["spread"].append(0.0)
+                rows["e"].append(0.0); rows["repeat"].append(0.0); rows["near"].append(0.0)
                 cams.append(("first", None, 0.0, 0)); regs.append([]); scatter.append(NO_SCATTER)
             else:
                 absd = cv2.absdiff(grey, prev)
@@ -410,10 +442,6 @@ def scan(path, info, tmp):
                 rows["e"].append(e)
                 rows["repeat"].append(float(repeat))
                 rows["near"].append(float(e < NEAR_REPEAT and int((absd > 10).sum()) < 0.0005 * absd.size))
-                delta = lab - prev_lab
-                med = np.median(delta, axis=0)
-                rows["dL"].append(float(med[0])); rows["da"].append(float(med[1])); rows["db"].append(float(med[2]))
-                rows["spread"].append(float(np.median(np.abs(delta - med).sum(axis=1))))
                 if repeat:
                     cams.append(("repeat", None, 1.0, 0)); regs.append([]); scatter.append(NO_SCATTER)
                 else:
@@ -430,7 +458,7 @@ def scan(path, info, tmp):
                             if hot is None:
                                 hot = np.zeros((ah, aw), bool)
                             hot[max(0, r.y0 - 8):min(ah, r.y1 + 8), max(0, r.x0 - 8):min(aw, r.x1 + 8)] = True
-            prev, prev_lab = grey, lab
+            prev = grey
             n += 1
     if n < 2:
         raise SystemExit("too few frames to read")
@@ -872,17 +900,21 @@ def link_tracks(regs, t, first, last, kind=0):
     live, done = [], []
     for i in range(first + 1, last):
         items = [r for r in regs[i] if r.kind == kind]
+        centres = [((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2) for r in items]
         scored = []
-        for ti, tr in enumerate(live):
+        for ti, tr in enumerate(live if items else ()):
             r0 = tr["regs"][-1]
             gap = i - tr["idx"][-1]
             cx, cy = (r0.x0 + r0.x1) / 2 + r0.vx * gap, (r0.y0 + r0.y1) / 2 + r0.vy * gap
             size = max(8.0, (r0.x1 - r0.x0 + r0.y1 - r0.y0) / 2)
+            reach = 6 if kind == 0 and gap == 1 else 1.2     # past it, with no overlap, neither test below can pass
             for gi, r in enumerate(items):
-                x, y = (r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2
+                x, y = centres[gi]
                 dist = math.hypot(x - cx, y - cy) / size
                 ix = max(0, min(r0.x1 + r0.vx, r.x1) - max(r0.x0 + r0.vx, r.x0))
                 iy = max(0, min(r0.y1 + r0.vy, r.y1) - max(r0.y0 + r0.vy, r.y0))
+                if (ix == 0 or iy == 0) and dist >= reach:
+                    continue
                 union = (r0.x1 - r0.x0) * (r0.y1 - r0.y0) + (r.x1 - r.x0) * (r.y1 - r.y0) - ix * iy
                 iou = ix * iy / max(union, 1)
                 dv = math.hypot(r.vx - r0.vx, r.vy - r0.vy)
@@ -972,10 +1004,6 @@ def merge_rests(tracks, scale_w):
     return merged
 
 
-def _net(tr):
-    return sum(r.vx for r in tr["regs"]), sum(r.vy for r in tr["regs"])
-
-
 def place_word(x, y, w, h):
     col = "left" if x < w / 3 else "right" if x > 2 * w / 3 else "centre"
     row = "top" if y < h / 3 else "bottom" if y > 2 * h / 3 else "middle"
@@ -996,7 +1024,7 @@ def size_word(area_share):
     return "tiny"
 
 
-def colour_word(b, g, r, fill):
+def colour_word(b, g, r):
     bgr = np.array([[[b, g, r]]], np.uint8)
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)[0, 0]
     v, s, h = int(hsv[2]), int(hsv[1]), int(hsv[0]) * 2
@@ -1026,7 +1054,6 @@ def _bridge(scanned, a, b):
     mask = scanned["stepped_mask"]
     idx = np.flatnonzero(mask)
     if len(idx) >= 2:
-        lo, hi = int(idx[0]), int(idx[-1])
         gap_ok = int(round(MAX_HOLD / max(float(np.median(np.diff(scanned["t"]))), 1e-6))) + 1
         last = None
         for i in idx.tolist():
@@ -1063,7 +1090,6 @@ def track_model(tr, scanned, label):
     boxes = np.array([(r.x0, r.y0, r.x1, r.y1) for r in tr["regs"]], float)
     w, h = np.median(boxes[:, 2] - boxes[:, 0]), np.median(boxes[:, 3] - boxes[:, 1])
     cx, cy = np.median((boxes[:, 0] + boxes[:, 2]) / 2), np.median((boxes[:, 1] + boxes[:, 3]) / 2)
-    fills = [r.fill for r in tr["regs"]]
     colours = np.array([(r.b, r.g, r.r) for r in tr["regs"]], float)
     colour = np.median(colours, axis=0)
     out_moves = []
@@ -1092,7 +1118,7 @@ def track_model(tr, scanned, label):
     churn = bool(out_moves) and (area_share >= 0.35 or (len(out_moves) >= 4 and net < 0.4 * total_path))
     return {"churn": churn, "path_total": total_path, "net_travel": net, "label": label, "first": ia - 1, "last": ib, "t0": float(t[ia - 1]), "t1": float(t[ib - 1]), "w": float(w * scale), "h": float(h * scale),
             "x": float(cx * scale), "y": float(cy * scale), "area_share": float(w * h / (aw * ah)), "where": place_word(cx, cy, aw, ah),
-            "size": size_word(float(w * h / (aw * ah))), "colour": colour_word(*colour.astype(int), np.median(fills)),
+            "size": size_word(float(w * h / (aw * ah))), "colour": colour_word(*colour.astype(int)),
             "seen_frames": len(tr["idx"]), "mean_coherence": float(np.mean(coh)), "moves": out_moves}
 
 
@@ -1397,7 +1423,7 @@ def mark_unexplained(shots, colours, sharp, scanned):
 def timecheck_findings(path, shots):
     """timecheck.py's own freeze and stutter findings, placed in the shots they fall in."""
     try:
-        data = timecheck.scan(str(path))
+        data = timecheck.scan(str(path), motion_only=True)
         found = [f for f in timecheck.detect(data) if f["kind"] in ("freeze", "stutter")]
     except (ValueError, OSError, subprocess.CalledProcessError) as exc:
         return {"ran": False, "error": str(exc)[:200], "findings": []}
@@ -1572,16 +1598,8 @@ def repeated_content(thumbs, shots, t):
     return out
 
 
-def fnum(x, digits=2):
-    return f"{x:.{digits}f}"
-
-
 def px(x):
     return f"{int(round(x))} px"
-
-
-def share(x):
-    return f"{100 * x:.0f}%"
 
 
 def write_motion(path, model):
@@ -1610,7 +1628,6 @@ def census_numbers(shots, scanned):
     durations, shapes, moves_total = [], [], 0
     big, overlap_starts, starts = 0, 0, 0
     for s in shots:
-        cam_moving = bool(s["camera"]["moves"] or s["camera"]["zooms"])
         for m in s["camera"]["moves"] + s["camera"]["zooms"]:
             i0, i1 = int(np.searchsorted(t, m["t0"])), int(np.searchsorted(t, m["t1"]))
             frame_active[i0:i1 + 1] = True
@@ -1709,12 +1726,13 @@ def analyse(path, out):
         similar_setups(shots, thumbs, t)
         repeats = repeated_content(thumbs, shots, t)
         census = census_numbers(shots, scanned)
+        frame_step = float(np.median(np.diff(scanned["t"]))) if len(scanned["t"]) > 1 else 1.0 / max(info["fps"], 1.0)
         del thumbs
     model = {"version": VERSION, "film": {"name": Path(path).name, **info, "frames_read": n, "analysis": {"aw": scanned["aw"], "ah": scanned["ah"]}}, "census": census, "timecheck": timecheck_findings(path, shots),
              "cadence": cad, "flashes": flashes, "repeats": repeats, "shots": [_shot_public(s) for s in shots]}
     Path(out).mkdir(parents=True, exist_ok=True)
     write_motion(Path(out) / "motion.json", model)
-    (Path(out) / "SEE.md").write_text(transcript(model), encoding="utf-8")
+    (Path(out) / "SEE.md").write_text(transcript(model, step=frame_step), encoding="utf-8")
     return model
 
 
@@ -1739,21 +1757,31 @@ def _shot_public(s):
 JOIN_WORDS = {"flurry": "a fast whole-picture change over several frames", "fade_through": "fades through blank", "cut": "hard cut in", "jump": "jump cut in (most of the picture is unchanged)", "dissolve": "dissolve in", "fade_in": "fades in", "fade_out": "fades out", "start": "opens the film"}
 
 
-def transcript(model):
+def _model_step(film):
+    fps = float(film.get("fps") or 30.0)
+    dec_step = max(1, int(round(fps / FPS_CAP))) if fps > FPS_CAP * 1.1 else 1
+    return dec_step / max(fps, 1.0)
+
+
+def transcript(model, step=None):
     """Budgeted text: the plan is to fit a 60-second film in a few hundred lines, dropping the smallest movers first."""
+    if step is None:
+        step = _model_step(model["film"])
     duration = model["census"]["duration"]
     limit = int(min(400, 60 + 5 * duration))
     for most in (8, 6, 4, 3, 2):
         for moves_each in (4, 3, 2):
-            lines = _text(model, most, moves_each)
+            lines = _text(model, most, moves_each, step=step)
             if len(lines) <= limit:
                 return "\n".join(lines) + "\n"
-    lines = _text(model, 2, 1, compact=True)
+    lines = _text(model, 2, 1, compact=True, step=step)
     return "\n".join(lines) + "\n"
 
 
-def _text(model, most, moves_each, compact=False):
+def _text(model, most, moves_each, compact=False, step=None):
     film, cen = model["film"], model["census"]
+    if step is None:
+        step = _model_step(film)
     lines = [f"# Motion transcript: {film['name']}", ""]
     every = [m for s in model["shots"] for th in s["things"] for m in th["moves"]]
     per_line = sum(m["trust"] != "good" for m in every) <= 0.5 * len(every)   # when most are estimates, one line at the top says so
@@ -1769,13 +1797,13 @@ def _text(model, most, moves_each, compact=False):
     for s in model["shots"]:
         if not compact:
             lines.append("")
-        lines += _compact_shot(s, film, per_line) if compact else _shot_lines(s, film, most, moves_each, per_line)
+        lines += _compact_shot(s, film, per_line, step=step) if compact else _shot_lines(s, film, most, moves_each, per_line, step=step)
     return lines
 
 
-def _compact_shot(s, film, per_line=True):
+def _compact_shot(s, film, per_line=True, step=1 / 30):
     """One or two lines for one shot, for films with so many shots that the full form won't fit."""
-    full = _shot_lines(s, film, 2, 1, per_line)
+    full = _shot_lines(s, film, 2, 1, per_line, step=step)
     notable = [x for x in full[1:] if x.startswith(("- Still", "- Repeated", "- Stepped", "- Colour", "- Sharpness", "- Sudden", "- Scattered", "Returns", "Fine detail"))]
     movers = [x for x in full if x.startswith("- A:") or x.startswith("  - ")][:2]
     return [full[0] + " " + " ".join(x.strip() for x in full[1:2])] + movers + notable
@@ -1827,14 +1855,12 @@ def _census_lines(model):
     return out
 
 
-def _shot_lines(s, film, most, moves_each, per_line=True):
+def _shot_lines(s, film, most, moves_each, per_line=True, step=1 / 30):
     H, W = film["h"], film["w"]
     join = s.get("join", {})
     head = f"### Shot {s['id']}: {s['t0']:.2f} to {s['t1']:.2f} s ({s['dur']:.2f} s), {JOIN_WORDS.get(join.get('kind', 'cut'), join.get('kind', 'cut'))}"
     if join.get("kind") == "flurry":
         head += f" ({join.get('last', 0) - join.get('first', 0) + 1} frames)"
-    if join.get("kind") in ("dissolve", "fade_in", "fade_out", "fade_through") and join.get("last", 0) > join.get("first", 0):
-        head = head.replace(" in", " in", 1)
     if s.get("carry"):
         head += f"; {s['carry']}"
     out = [head + "."]
@@ -1885,7 +1911,7 @@ def _shot_lines(s, film, most, moves_each, per_line=True):
         out.append(f"- Repeated frames: {x['t0']:.2f} to {x['t1']:.2f} s, only {100 * x['new_share']:.0f}% of frames are new" + (f" (each picture held for {holds} frames)" if holds else "") + ".")
     for x in s["colour"]:
         rev = f", changing back at {x['reverts_at']:.2f} s" if x.get("reverts_at") else ", and it stays that way"
-        out.append(f"- Colour: at {x['t']:.2f} s the whole picture {colour_phrase(x)} in {_frames_phrase(x)}{rev}. Mean change: brightness {x['dL']:+.1f}, red-green {x['da']:+.1f}, yellow-blue {x['db']:+.1f}.")
+        out.append(f"- Colour: at {x['t']:.2f} s the whole picture {colour_phrase(x)} in {_frames_phrase(x, step=step)}{rev}. Mean change: brightness {x['dL']:+.1f}, red-green {x['da']:+.1f}, yellow-blue {x['db']:+.1f}.")
         if x.get("unexplained"):
             out.append("- " + _sudden_colour(x))
     for x in s["sharpness"]:
@@ -1917,8 +1943,8 @@ def _max_overlap(things):
     return best
 
 
-def _frames_phrase(x):
-    return "one frame" if x["t_end"] == x["t"] else f"{x['t_end'] - x['t'] + 1 / 30:.2f} s"
+def _frames_phrase(x, step=1 / 30):
+    return "one frame" if x["t_end"] == x["t"] else f"{x['t_end'] - x['t'] + step:.2f} s"
 
 
 def _count_word(n):

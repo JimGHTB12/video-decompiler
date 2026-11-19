@@ -30,22 +30,37 @@ import cv2
 import numpy as np
 
 cv2.setNumThreads(1)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import film_diff  # noqa: E402
+
 _SHOW = re.compile(r"showinfo.*?\bn:\s*(\d+)\s+pts:\s*[-\d]+\s+pts_time:\s*([-+\deE.]+)")
 _ANGLE = np.arange(180, dtype=np.float32) * (2 * np.pi / 180)
 _COS = np.cos(_ANGLE)
 _SIN = np.sin(_ANGLE)
 
 
+def hue_shift(hsv, prev_hsv):
+    """(hue_deg, coherence, saturation) of the circular HSV hue step between two 160x90 frames, in timecheck's own float32
+    order. see.scan keeps its own (see _HUE_COS there): the two round apart at the 6-degree line, so they are not one."""
+    dh = ((hsv[:, :, 0].astype(np.int16) - prev_hsv[:, :, 0].astype(np.int16)) % 180).astype(np.uint8)
+    weight = np.minimum(hsv[:, :, 1], prev_hsv[:, :, 1]).astype(np.float32)
+    weight *= np.minimum(hsv[:, :, 2], prev_hsv[:, :, 2]).astype(np.float32) / 255.0
+    den = float(weight.sum())
+    if den:
+        x = float((_COS[dh] * weight).sum() / den)
+        y = float((_SIN[dh] * weight).sum() / den)
+        return math.degrees(math.atan2(y, x)), math.hypot(x, y), den / weight.size
+    return 0.0, 0.0, 0.0
+
+
 def probe(path):
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    import film_diff
     try:  # the one reader that says, in words, when a file isn't there or is a still picture
         film_diff.ffprobe(path)
     except SystemExit as e:
         raise ValueError(str(e)) from None
     p = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'v:0',
                         '-show_entries', 'stream=width,height,r_frame_rate,avg_frame_rate,disposition:format=start_time',
-                        '-of', 'json', path], capture_output=True, text=True, check=True)
+                        '-of', 'json', path], capture_output=True, text=True, check=True, creationflags=film_diff.NO_WINDOW)
     info = json.loads(p.stdout)
     if not info.get('streams'):
         raise ValueError('no video stream')
@@ -63,13 +78,13 @@ def probe(path):
     return w, h, max(2, int(round(w * scale / 2)) * 2), max(2, int(round(h * scale / 2)) * 2), rate
 
 
-def scan(path):
+def scan(path, motion_only=False):
     _, _, w, h, nominal_rate = probe(path)
     cmd = ['ffmpeg', '-hide_banner', '-nostdin', '-v', 'info', '-xerror',
            '-threads', '2', '-noautorotate', '-i', path, '-map', '0:v:0',
            '-an', '-sn', '-dn', '-vf', f'scale={w}:{h}:flags=area,showinfo',
            '-fps_mode', 'passthrough', '-pix_fmt', 'bgr24', '-f', 'rawvideo', 'pipe:1']
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=1024 * 1024)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=1024 * 1024, creationflags=film_diff.NO_WINDOW)
     timestamps, diagnostics = [], []
     def read_log():
         for line in iter(proc.stderr.readline, b''):
@@ -84,18 +99,30 @@ def scan(path):
     diff, detail, corr, hue, coherence, saturation, changed = [], [], [], [], [], [], []
     prev_g = prev_hsv = None
     size = w * h * 3
+    eof = False
     try:
         while True:
             raw = proc.stdout.read(size)
             if not raw:
+                eof = True
                 break
             if len(raw) != size:
                 raise ValueError('truncated decoded frame')
             image = np.frombuffer(raw, dtype=np.uint8).reshape(h, w, 3)
-            grey = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            detail.append(float(cv2.Laplacian(grey, cv2.CV_32F).var()))
             small = cv2.resize(image, (160, 90), interpolation=cv2.INTER_AREA)
             g = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            # see.py uses only freeze and stutter, which read `diff` and `changed`: skip full-size Laplacian, HSV and matchTemplate
+            if motion_only:
+                if prev_g is None:
+                    diff.append(0.0); changed.append(0.0)
+                else:
+                    moved = cv2.absdiff(g, prev_g)
+                    diff.append(float(moved.mean()))
+                    changed.append(float((moved > 12).mean()))
+                prev_g = g
+                continue
+            grey = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            detail.append(float(cv2.Laplacian(grey, cv2.CV_32F).var()))
             hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
             if prev_g is None:
                 diff.append(0.0); corr.append(1.0); hue.append(0.0); coherence.append(0.0); saturation.append(0.0); changed.append(0.0)
@@ -104,22 +131,16 @@ def scan(path):
                 diff.append(float(moved.mean()))
                 changed.append(float((moved > 12).mean()))
                 corr.append(float(cv2.matchTemplate(g, prev_g, cv2.TM_CCOEFF_NORMED)[0, 0]))
-                dh = ((hsv[:, :, 0].astype(np.int16) - prev_hsv[:, :, 0].astype(np.int16)) % 180).astype(np.uint8)
-                weight = np.minimum(hsv[:, :, 1], prev_hsv[:, :, 1]).astype(np.float32)
-                weight *= np.minimum(hsv[:, :, 2], prev_hsv[:, :, 2]).astype(np.float32) / 255.0
-                den = float(weight.sum())
-                saturation.append(den / weight.size)
-                if den:
-                    x = float((_COS[dh] * weight).sum() / den)
-                    y = float((_SIN[dh] * weight).sum() / den)
-                    hue.append(math.degrees(math.atan2(y, x)))
-                    coherence.append(math.hypot(x, y))
-                else:
-                    hue.append(0.0); coherence.append(0.0)
+                h_deg, h_coh, sat = hue_shift(hsv, prev_hsv)
+                hue.append(h_deg); coherence.append(h_coh); saturation.append(sat)
             prev_g, prev_hsv = g, hsv
     finally:
         proc.stdout.close()
-        rc = proc.wait()
+        if not eof:
+            film_diff.stop_decoder(proc)
+            rc = proc.returncode or 0
+        else:
+            rc = proc.wait()
         log.join()
         proc.stderr.close()
     n = len(diff)
@@ -139,6 +160,9 @@ def scan(path):
     # The last displayed duration is not provided by showinfo; estimate it from
     # the median decoded-frame interval rather than the container/audio length.
     frame_end = float(ts[-1] + np.median(intervals))
+    if motion_only:
+        return {'time': ts.tolist(), 'end': frame_end, 'fps': nominal_rate,
+                'diff': diff, 'changed': changed, 'motion_only': True}
     return {'time': ts.tolist(), 'end': frame_end, 'fps': nominal_rate,
             'diff': diff, 'detail': detail, 'corr': corr, 'hue': hue,
             'coherence': coherence, 'saturation': saturation, 'changed': changed}
@@ -157,11 +181,6 @@ def _finding(kind, start, end, reason):
 def detect(data, freeze_seconds=1.5):
     t = np.array(data['time'], dtype=float)
     d = np.array(data['diff'], dtype=float)
-    detail = np.array(data['detail'], dtype=float)
-    corr = np.array(data['corr'], dtype=float)
-    hue = np.array(data['hue'], dtype=float)
-    coherence = np.array(data['coherence'], dtype=float)
-    saturation = np.array(data['saturation'], dtype=float)
     n, fps = len(t), data['fps']
     ends = np.r_[t[1:], data['end']]
     findings = []
@@ -207,6 +226,16 @@ def detect(data, freeze_seconds=1.5):
         findings.append(_finding('stutter', t[start_i], ends[end_i-1],
                                   f'Repeated holds of about {typical+1:.0f} frames exceed nearby cadence (75th percentile {baseline+1:.0f} frames).'))
         used.update(x[0] for x in cluster)
+
+    if data.get('motion_only'):
+        findings.sort(key=lambda f: (f['start'], f['kind']))
+        return findings
+
+    detail = np.array(data['detail'], dtype=float)
+    corr = np.array(data['corr'], dtype=float)
+    hue = np.array(data['hue'], dtype=float)
+    coherence = np.array(data['coherence'], dtype=float)
+    saturation = np.array(data['saturation'], dtype=float)
 
     # A sharply reduced, sustained high-frequency measure without a picture
     # cut. The end is where detail returns, a shot transition begins, or the

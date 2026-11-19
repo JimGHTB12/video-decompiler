@@ -10,6 +10,7 @@ stretches picked, in a pack and in vd pin.
 
   python tests/test_pack.py
 """
+import contextlib
 import shutil
 import subprocess
 import sys
@@ -228,6 +229,14 @@ def test_a_makers_packs_deal_ours_a_new_letter_each_time():
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         refs = [film(tmp / "ref.mp4", "blue", 3), film(tmp / "good.mp4", "green", 2)]
+
+        def our_sheets(film, alone, lineup_ours, k, k_alone, times=None):
+            # a stand-in for our film's story and motion sheets: the letters are dealt by make, deal and ours_before,
+            # which stay real; drawing the sheets was most of this test's time
+            for folder in [alone] + ([lineup_ours] if lineup_ours is not None else []):
+                folder.mkdir(parents=True, exist_ok=True)
+                (folder / "story-1.jpg").write_bytes(b"a stand-in sheet")
+            return 1, [], []
         for start in (1, 2):                                 # 2 films then 3, and 3 films then 4
             for inside in (True, False):
                 name = f"f{start}{'in' if inside else 'out'}"
@@ -237,7 +246,13 @@ def test_a_makers_packs_deal_ours_a_new_letter_each_time():
                 out = tmp / "out" / name
                 (out / "cuts").mkdir(parents=True)
                 ours = []
-                with patch.object(lean, "OUTROOT", tmp / "out"), patch.object(pack, "READS", tmp / "reads"), patch.object(Path, "cwd", lambda: d if inside else tmp):
+                # one maker's three packs (3 films, then 4) draw everything for real; the others' sheets and keys are stand-ins
+                real = name == "f2out"
+                stand_ins = [] if real else [patch.object(pack, "ours_material", our_sheets), patch.object(pack, "keys", lambda *a, **k: [])]
+                with patch.object(lean, "OUTROOT", tmp / "out"), patch.object(pack, "READS", tmp / "reads"), patch.object(Path, "cwd", lambda: d if inside else tmp), \
+                        contextlib.ExitStack() as stack:
+                    for p in stand_ins:
+                        stack.enter_context(p)
                     for n in (1, 2, 3):
                         cut = film(out / "cuts" / f"{name}-cut{n}.mp4", ("red", "white", "yellow")[n - 1], 2)    # vd export: cut n, and NAME.mp4 the latest
                         shutil.copy2(cut, out / f"{name}.mp4")
@@ -281,7 +296,166 @@ def test_pin_gives_the_pinned_film_to_take_apart():
         assert any(abs(t - 3.0) <= 2 / 60 for t in scan.windows(ref, 60, 2)), "the picked stretch holds the burst"
         assert sorted(f.name for f in src.iterdir()) == sorted(f.name for f in story + moving), "made by vd pack's own code, cached"
         assert [f.name for f in sorted(got.glob("key-*.jpg"))] == [f"key-{i}.jpg" for i in range(1, 7)], "and six frames at rest, full size"
+        # D3b: the keys are kept with the sheets, so pinning the film again reads no changes and draws no keys, and gives
+        # the same files
+        first = {f.name: f.read_bytes() for f in got.glob("key-*.jpg")}
+        from unittest.mock import patch
+        with patch.object(scan, "changes", lambda *a, **k: (_ for _ in ()).throw(AssertionError("read its changes again"))):
+            again = lean.pin_material(ref, tmp / "out2", cache_root=tmp / "cache", k=2)
+        assert {f.name: f.read_bytes() for f in again.glob("key-*.jpg")} == first
         assert lean.pin_material(tmp / "measures.json", tmp / "out") is None
+
+
+def test_pack_reads_frame_times_once_for_ours():
+    import film_diff
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        ours = burst(tmp / "ours.mp4", fps=24, seconds=6, at=2.0)
+        ref = film(tmp / "ref.mp4", "blue", 3)
+        real_ft, real_run = film_diff.frame_times, pack.subprocess.run
+        ft_calls, sheet_cmds = [], []
+
+        def count_ft(path):
+            if Path(path).resolve() == Path(ours).resolve():
+                ft_calls.append(1)
+            return real_ft(path)
+
+        def spy_run(cmd, *a, **kw):
+            if isinstance(cmd, (list, tuple)) and any(str(x).endswith("sheet.py") for x in cmd):
+                sheet_cmds.append([str(x) for x in cmd])
+            return real_run(cmd, *a, **kw)
+
+        with patch.object(film_diff, "frame_times", count_ft), patch.object(sheet, "frame_times", count_ft), \
+                patch.object(pack.subprocess, "run", spy_run):
+            pack.make(ours, [ref], tmp / "out", cache_root=tmp / "cache", k=2, k_alone=3, reads_root=tmp / "reads")
+        assert len(ft_calls) == 1, f"ours's frame_times read once per pack.make, not {len(ft_calls)} times"
+        assert all("--frame-times" in c for c in sheet_cmds), f"every sheet.py subprocess receives pre-read frame_times: {sheet_cmds}"
+        import numpy as np
+        ft_file = tmp / "ours_times.npy"
+        np.save(ft_file, real_ft(ours))
+        with patch.object(sheet, "frame_times", side_effect=AssertionError("sheet.py re-read frame_times")), \
+                patch.object(sys, "argv", ["sheet.py", str(ours), "-o", str(tmp / "m.jpg"), "--native", "--from", "2.0", "--to", "3.0", "--frame-times", str(ft_file)]):
+            sheet.main()
+        assert (tmp / "m.jpg").is_file()
+
+
+def test_pack_builds_ours_story_and_motion_stretches_once():
+    import scan
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        fps = 24
+        # three 1 s bursts of different speeds (rank 1 at 2.5 s, rank 2 at 5.0 s, rank 3 at 0.0 s)
+        def three_bursts(f):
+            t = f / fps
+            if t < 1.0:
+                return 1.0 * f
+            base1 = 1.0 * fps
+            if t < 2.5:
+                return base1
+            if t < 3.5:
+                return base1 + 6.0 * (f - int(2.5 * fps))
+            base2 = base1 + 6.0 * fps
+            if t < 5.0:
+                return base2
+            if t < 6.0:
+                return base2 + 3.0 * (f - int(5.0 * fps))
+            return base2 + 3.0 * fps
+        ours = moving_film(tmp / "ours.mp4", fps, 7, clock=three_bursts)
+        ref = film(tmp / "ref.mp4", "blue", 3)
+        real_tiles, real_changes, real_run, real_ef = pack.tiles, scan.changes, pack.subprocess.run, sheet.every_frame
+        tiles_n, changes_n, stretch_n = [], [], []
+
+        def spy_tiles(f, *a, **kw):
+            if Path(f).resolve() == Path(ours).resolve():
+                tiles_n.append(1)
+            return real_tiles(f, *a, **kw)
+
+        def spy_changes(f, *a, **kw):
+            if Path(f).resolve() == Path(ours).resolve():
+                changes_n.append(1)
+            return real_changes(f, *a, **kw)
+
+        def spy_run(cmd, *a, **kw):
+            if isinstance(cmd, (list, tuple)) and any(str(x).endswith("sheet.py") for x in cmd) and str(ours.resolve()) in [str(x) for x in cmd]:
+                stretch_n.append(1)
+            return real_run(cmd, *a, **kw)
+
+        def spy_ef(a_ns, *a, **kw):
+            if Path(a_ns.video).resolve() == Path(ours).resolve():
+                stretch_n.append(1)
+            return real_ef(a_ns, *a, **kw)
+
+        with patch.object(pack, "tiles", spy_tiles), patch.object(scan, "changes", spy_changes), \
+                patch.object(pack.subprocess, "run", spy_run), patch.object(sheet, "every_frame", spy_ef):
+            p, key, letters = pack.make(ours, [ref], tmp / "out", cache_root=tmp / "cache", k=2, k_alone=3, reads_root=tmp / "reads")
+        assert (len(tiles_n), len(changes_n), len(stretch_n)) == (1, 1, 3), \
+            f"ours built once (1 tiles, 1 scan.changes, 3 union stretches), got {(len(tiles_n), len(changes_n), len(stretch_n))}"
+        mine = next(l for l, f in letters.items() if f.name == "ours.mp4")
+        lu_moves = sorted((p / "lineup" / mine).glob("move-*.jpg"))
+        al_moves = sorted((p / "alone").glob("move-*.jpg"))
+        assert [m.name for m in lu_moves] == ["move-1.jpg", "move-2.jpg"]
+        assert [m.name for m in al_moves] == ["move-1.jpg", "move-2.jpg", "move-3.jpg"]
+        # alone/ includes the earlier 0.0 s rank-3 stretch as move-1, so lineup's move-1..2 match alone's move-2..3
+        assert lu_moves[0].read_bytes() == al_moves[1].read_bytes() and lu_moves[1].read_bytes() == al_moves[2].read_bytes()
+
+
+def test_moves_runs_sheet_in_process_and_keeps_failure_wording():
+    import decode
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        ours = burst(tmp / "ours.mp4", fps=24, seconds=6, at=2.0)
+        real_run = pack.subprocess.run
+        sheet_subprocs = []
+
+        def spy_run(cmd, *a, **kw):
+            if isinstance(cmd, (list, tuple)) and any(str(x).endswith("sheet.py") for x in cmd):
+                sheet_subprocs.append([str(x) for x in cmd])
+            return real_run(cmd, *a, **kw)
+
+        with patch.object(pack.subprocess, "run", spy_run):
+            starts = pack.moves(ours, tmp / "moves", k=2)
+        assert len(starts) == 2 and [p.name for p in sorted((tmp / "moves").glob("move-*.jpg"))] == ["move-1.jpg", "move-2.jpg"]
+        assert not sheet_subprocs, f"pack.moves runs sheet in-process, not via subprocess: {sheet_subprocs}"
+
+        real_pics = decode.pictures
+
+        def fail_rgb(cmd, size, *a, **kw):
+            if size == pack.MOVE_W * 180 * 3:
+                raise SystemExit("planted stretch decode fault")
+            return real_pics(cmd, size, *a, **kw)
+
+        try:
+            with patch.object(decode, "pictures", fail_rgb):
+                pack.moves(ours, tmp / "bad_moves", k=2)
+            raise AssertionError("failing stretch must raise SystemExit")
+        except SystemExit as e:
+            assert "sheet.py could not draw the stretch from " in str(e) and "planted stretch decode fault" in str(e), e
+
+
+def test_keys_from_one_call_are_the_keys_one_call_each_made():
+    # C5c+D3a: every key comes from one ffmpeg with an input and an -ss each; each must be the bytes its own call made
+    # (PNG, and JPEG made from it), on a plain file and the awkward ones; a key file left from before is never passed off
+    # as one this call made
+    import hashlib
+    import awkward
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        for film, times, pat in ((awkward.numbered(tmp), [0.0, 1.0, 2.5, 4.9], "key-{i}-{t:.2f}s.png"), (awkward.preroll(tmp), [0.0, 0.05, 2.0], "key-{i}.jpg"),
+                                 (awkward.vfr_late(tmp), [0.0, 0.3, 1.95], "key-{i}.jpg")):
+            together, alone = tmp / f"t-{film.stem}", tmp / f"a-{film.stem}"
+            pack.keys(film, times, together, name=pat)
+            alone.mkdir()
+            pack.keys_one_by_one(film, [(t, alone / pat.format(i=i, t=t)) for i, t in enumerate(times, 1)], [])
+            h = lambda d: {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in d.iterdir()}
+            assert h(together) == h(alone) and len(h(alone)) == len(times), (film.name, h(together), h(alone))
+        stale = tmp / "stale"
+        stale.mkdir()
+        (stale / "key-1-99.00s.png").write_bytes(b"from an earlier pack")
+        pack.keys(awkward.numbered(tmp), [99.0], stale)
+        assert not (stale / "key-1-99.00s.png").exists() or (stale / "key-1-99.00s.png").read_bytes() != b"from an earlier pack"
 
 
 if __name__ == "__main__":

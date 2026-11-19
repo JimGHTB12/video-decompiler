@@ -367,6 +367,35 @@ def find_bun():
     return None
 
 
+# what esbuild or bun can import from a film; the rest of media/ (pictures, sound, fonts) is fetched by the page
+BUNDLED = {".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx", ".json", ".css", ".txt", ".toml"}
+
+
+def work_ignore(film_dir: Path):
+    """copytree's ignore for the bundler's copy of the film: no build folders, and of media/ only what can be imported"""
+    skip = shutil.ignore_patterns("__pycache__", "node_modules", ".git", "out", "candidates")
+    media = film_dir / "media"
+
+    def ignore(folder, names):
+        gone = set(skip(folder, names))
+        here = Path(folder)
+        if here == media or media in here.parents:
+            gone |= {n for n in names if Path(n).suffix.lower() not in BUNDLED and (here / n).is_file()}
+        return gone
+    return ignore
+
+
+def copy_if_changed(src, dst):
+    """shutil.copy2, skipped when dst is already src's copy (same size and modification time, as copy2 leaves it)"""
+    try:
+        a, b = os.stat(src), os.stat(dst)
+        if a.st_size == b.st_size and a.st_mtime_ns == b.st_mtime_ns:
+            return dst
+    except OSError:
+        pass
+    return shutil.copy2(src, dst)
+
+
 def collect_film_meta(film_dir: Path):
     import lean
     s = lean.score_of(film_dir) if (film_dir / "score.json").is_file() else {"fps": 60, "width": 1920, "height": 1080, "duration": 30.0}
@@ -405,13 +434,13 @@ def build_playable(film_dir: Path, entry: Path = None, out_dir: Path = None):
     meta = collect_film_meta(film_dir)
 
     esbuild = find_esbuild()
-    bun = find_bun()
+    bun = None if esbuild else find_bun()
     if not esbuild and not bun:
         raise SystemExit("vd playable needs esbuild or bun to bundle TSX for the browser (install esbuild via npm or bun from https://bun.sh)")
     bundle_js = out_dir / "bundle.js"
     with tempfile.TemporaryDirectory() as tmp:
         w = Path(tmp) / "work"
-        shutil.copytree(film_dir, w, ignore=shutil.ignore_patterns("__pycache__", "node_modules", ".git", "out", "candidates"))
+        shutil.copytree(film_dir, w, ignore=work_ignore(film_dir))
         # Install local zero-dependency raea + react + vd-jsx shims inside node_modules
         raea_mod = w / "node_modules" / "raea"
         jsx_mod = w / "node_modules" / "vd-jsx"
@@ -447,14 +476,17 @@ def build_playable(film_dir: Path, entry: Path = None, out_dir: Path = None):
         if p.returncode != 0:
             raise SystemExit(f"playable bundle failed:\n{p.stdout}\n{p.stderr}")
 
-    # Copy media assets (art, sound.wav) so staticFile() and WebAudio resolve locally
-    if (film_dir / "media").is_dir():
-        shutil.copytree(film_dir / "media", out_dir / "media", dirs_exist_ok=True)
     # the page plays the sound the export lays under the picture (lean.film_sound), copied on every build: the film's own
     # media/sound.wav had won, so a film with a voice or a mapped track played its own mix alone (foley with no music),
     # and an earlier rule kept a rebuilt mix from ever reaching a page built before it
     s = lean.score_of(film_dir) if (film_dir / "score.json").is_file() else None
     built_wav = lean.film_sound(film_dir, s)[0] if s else lean.outdir(film_dir) / "sound.wav"
+    replaced = built_wav.is_file() and built_wav.resolve() != (out_dir / "media" / "sound.wav").resolve()
+    # Copy media assets (art, sound.wav) so staticFile() and WebAudio resolve locally; a file already copied unchanged
+    # is left, and the film's sound.wav is not copied when the mix below takes its place
+    if (film_dir / "media").is_dir():
+        shutil.copytree(film_dir / "media", out_dir / "media", dirs_exist_ok=True, copy_function=copy_if_changed,
+                        ignore=lambda folder, names: ["sound.wav"] if replaced and Path(folder) == film_dir / "media" else [])
     if built_wav.is_file():
         (out_dir / "media").mkdir(parents=True, exist_ok=True)
         if built_wav.resolve() != (out_dir / "media" / "sound.wav").resolve():

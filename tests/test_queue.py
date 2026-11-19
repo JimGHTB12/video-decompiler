@@ -44,6 +44,56 @@ def test_the_newest_raea_that_meets_the_pin_is_found_with_no_variable():
             assert "Looked in: beside the skill, ~/.raea, PATH" in said and "Set RAEA_BIN" in said, said
 
 
+def test_raea_is_looked_for_five_parts_down_and_a_found_one_is_handed_on():
+    # A6: the walk under ~/.raea stops at the depth it keeps (five parts), where rglob went through every folder first
+    sys.path.insert(0, str(Path(raea_run.__file__).parent))
+    import lean
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as tmp:
+        place = Path(tmp)
+        kept = place / "a" / "b" / "c" / "d" / raea_run.EXE              # five parts down: found
+        deep = place / "a" / "b" / "c" / "d" / "e" / "f" / raea_run.EXE  # seven: not
+        side = place / "x" / raea_run.EXE.upper()                       # a name in other case, where names have no case
+        for f in (kept, deep, side):
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_bytes(b"")
+        (place / "y" / raea_run.EXE).mkdir(parents=True)                # a folder with the name is not a raea
+        got = raea_run.exes_under(place)
+        want = [kept] + ([side] if os.path.normcase("A") == "a" else [])
+        assert got == want, got
+
+        class Unreadable:                                               # a link that loops, or an entry this user may not read
+            def __init__(self, entry):
+                self.name, self.path = entry.name, entry.path
+
+            def is_file(self, **kw):
+                raise OSError(40, "Too many levels of symbolic links")
+
+            is_dir = is_file
+
+        scandir = os.scandir
+
+        class Scan:                                                     # the folder as it is, with one such entry in it
+            def __init__(self, folder):
+                with scandir(folder) as it:
+                    self.entries = list(it)
+
+            def __enter__(self):
+                return iter([Unreadable(e) if e.name == "x" else e for e in self.entries])
+
+            def __exit__(self, *a):
+                return False
+        with patch.object(raea_run.os, "scandir", Scan):
+            assert raea_run.exes_under(place) == [kept], "an entry that cannot be read is passed over, and the rest are found"
+    # a raea this process has already found and checked is handed to the child it starts, unless RAEA_BIN was set
+    with patch.object(raea_run, "_FOUND", ("/opt/raea/raea", raea_run.PIN)), patch.dict(os.environ, {"RAEA_BIN": ""}):
+        assert lean.checked_raea_env() == {"RAEA_BIN": "/opt/raea/raea"}, lean.checked_raea_env()
+    with patch.object(raea_run, "_FOUND", ("/opt/raea/raea", raea_run.PIN)), patch.dict(os.environ, {"RAEA_BIN": "mine"}):
+        assert lean.checked_raea_env() == {}, "a RAEA_BIN the person set is theirs"
+    with patch.object(raea_run, "_FOUND", None), patch.dict(os.environ, {"RAEA_BIN": ""}):
+        assert lean.checked_raea_env() == {}, "nothing found yet: the child looks for itself"
+
+
 def test_one_pin():
     import re
     said = re.search(r'^RAEA = "([^"]+)"', (TOOLS / "vd.py").read_text(encoding="utf-8"), re.M).group(1)
@@ -110,11 +160,14 @@ def test_a_child_of_the_holder_does_not_wait_for_its_parent():
         finally:
             other_holder.kill()
             other_holder.wait()
-        # letting go takes the mark and the note with it
+        # letting go takes the mark and the note with it, while keeping any outer holder's mark (such as heavy.py)
+        before = raea_run.marks()
         h = raea_run.one_at_a_time(wait=20, lock=lock, kind="heavy")
-        assert os.environ.get(raea_run.HELD, "").startswith(f"{os.getpid()}|") and raea_run.read_holder(lock)[0] == os.getpid()
-        h.close()
-        assert raea_run.HELD not in os.environ and raea_run.read_holder(lock) is None
+        try:
+            assert (os.getpid(), str(lock.resolve())) in raea_run.marks() and raea_run.read_holder(lock)[0] == os.getpid()
+        finally:
+            h.close()
+        assert raea_run.marks() == before and raea_run.read_holder(lock) is None
 
 
 def private_lock(home):

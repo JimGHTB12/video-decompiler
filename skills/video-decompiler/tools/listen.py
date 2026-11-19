@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure sound, earshot 7-launch-film spectral/stereo profile, onset transcript, circular-shift sync coincidence,
+"""Measure sound, earshot 7-launch-film spectral/stereo profile, onset transcript,
 and 5-lane visual sound sheet, ported from legible-film.
 
   python listen.py measure AUDIO_OR_VIDEO [--json report.json]
@@ -63,27 +63,11 @@ def decode_audio(path, rate=RATE, channels=2, ffmpeg=None):
 
 
 def loudness(path, ffmpeg=None):
+    import voice_clean
     ffmpeg = ffmpeg or shutil.which("ffmpeg")
     if not ffmpeg:
         raise ValueError("ffmpeg is required on PATH")
-    cmd = [
-        ffmpeg, "-hide_banner", "-nostats", "-nostdin", "-i", str(path), "-map", "0:a:0",
-        "-af", "loudnorm=I=-16:LRA=11:TP=-1:print_format=json", "-f", "null", "-",
-    ]
-    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
-    matches = re.findall(r'\{[^{}]*"input_i"[^{}]*\}', r.stderr, re.DOTALL)
-    if not matches:
-        return {"integrated_lufs": None, "true_peak_dbtp": None, "lra_lu": None}
-    data = json.loads(matches[-1])
-
-    def val(k):
-        try:
-            v = float(data[k])
-            return v if math.isfinite(v) else None
-        except (KeyError, TypeError, ValueError):
-            return None
-
-    return {"integrated_lufs": val("input_i"), "true_peak_dbtp": val("input_tp"), "lra_lu": val("input_lra")}
+    return voice_clean.meter_loudness(ffmpeg, path, target_i=-16)
 
 
 def spectrum(samples):
@@ -94,8 +78,9 @@ def spectrum(samples):
     step = max(1, count // 2)
     starts = range(0, len(samples) - count + 1, step)
     power = np.zeros(count // 2 + 1, dtype=np.float64)
+    window = np.hanning(count)[:, None]
     for start in starts:
-        segment = samples[start:start + count] * np.hanning(count)[:, None]
+        segment = samples[start:start + count] * window
         power += np.sum(np.abs(np.fft.rfft(segment, axis=0)) ** 2, axis=1)
     freqs = np.fft.rfftfreq(count, 1.0 / RATE)
     total = float(power.sum())
@@ -169,9 +154,9 @@ def section_changes(samples):
     return result
 
 
-def transcript(path, detail="normal"):
+def transcript(path, detail="normal", samples=None):
     import tempo_map
-    samples = decode_audio(path)
+    samples = decode_audio(path) if samples is None else samples
     channels = decode_audio(path, rate=tempo_map.RATE, channels=2)
     detected = []
     for ch in range(channels.shape[1]):
@@ -204,41 +189,13 @@ def transcript(path, detail="normal"):
     }
 
 
-def coincidence(first, second, tolerance, duration, seed=0, iterations=200):
-    """Compare event coincidence with circularly shifted event times."""
-    first, second = np.asarray(first, dtype=float), np.asarray(second, dtype=float)
-    result = {"n": len(first), "seed": seed, "iterations": iterations, "tolerance_s": tolerance}
-    if len(first) == 0 or len(second) == 0 or duration <= 2.0:
-        return dict(result, state="inconclusive", reason="too few events or duration for a shift null")
-
-    def fraction(a, b):
-        b = np.sort(b)
-        pos = np.searchsorted(b, a)
-        left = b[np.clip(pos - 1, 0, len(b) - 1)]
-        right = b[np.clip(pos, 0, len(b) - 1)]
-        return float(np.mean(np.minimum(np.abs(a - left), np.abs(a - right)) <= tolerance))
-
-    observed = fraction(first, second)
-    rng = np.random.default_rng(seed)
-    null = [fraction(first, (second + shift) % duration) for shift in rng.uniform(1.0, duration - 1.0, iterations)]
-    p95 = float(np.percentile(null, 95))
-    return dict(
-        result,
-        state="above shifted chance" if observed > p95 else "not distinguishable",
-        observed=round(observed, 4),
-        chance_mean=round(float(np.mean(null)), 4),
-        chance_p95=round(p95, 4),
-        spread=[round(float(min(null)), 4), round(float(max(null)), 4)],
-    )
-
-
-def sheet(path, out_png, cues_list=None):
+def sheet(path, out_png, cues_list=None, samples=None):
     """Draw a 5-lane time-aligned PNG of the sound: onsets, spectrogram, waveform, 8 dB sections, and beats/cues."""
     from PIL import Image, ImageDraw, ImageFont
     destination = Path(out_png)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    samples = decode_audio(path)
-    tl = transcript(path)
+    samples = decode_audio(path) if samples is None else samples
+    tl = transcript(path, samples=samples)
     duration = len(samples) / RATE
     width, height, left, right = 1600, 760, 110, 1550
     panel = Image.new("RGB", (width, height), "#f8f8f5")
@@ -313,6 +270,7 @@ def main(argv=None):
     sh = sub.add_parser("sheet")
     sh.add_argument("path")
     sh.add_argument("--out", required=True)
+    sh.add_argument("--cues", help="optional cues.json (events list or v2 cues document)")
     a = ap.parse_args(argv)
     if a.cmd == "measure":
         res = measure(a.path)
@@ -325,7 +283,11 @@ def main(argv=None):
             Path(a.json_out).write_text(json.dumps(res, indent=1) + "\n", encoding="utf-8")
         print(f"{Path(a.path).name}: {len(res['events'])} onsets, {len(res['sections'])} section jumps, beat_grid={res['beat_grid_status']}")
     elif a.cmd == "sheet":
-        res = sheet(a.path, a.out)
+        cues_list = None
+        if a.cues:
+            raw_cues = json.loads(Path(a.cues).read_text(encoding="utf-8"))
+            cues_list = raw_cues.get("events") or raw_cues.get("cues") or [] if isinstance(raw_cues, dict) else raw_cues
+        res = sheet(a.path, a.out, cues_list=cues_list)
         print(res["png"])
     return 0
 

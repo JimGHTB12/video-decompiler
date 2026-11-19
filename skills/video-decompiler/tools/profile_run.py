@@ -32,7 +32,7 @@ keyword. The automatic marks are a rough guide only.
 Secrets: commands and texts are passed through a redaction filter and truncated to
 200 characters before they are written anywhere.
 """
-import argparse, csv, json, os, re, sys
+import argparse, bisect, csv, json, os, re, sys
 from collections import defaultdict, Counter
 from datetime import datetime, timezone
 
@@ -186,11 +186,17 @@ def human_prompt(e):
     return None
 
 
+# a line whose own type is user or assistant has this in it; most lines (progress, system, snapshots) do not
+TURN_LINE = re.compile(r'"type"\s*:\s*"(?:user|assistant)"')
+
+
 def load(paths, until=None, since=None):
     ents = []
     for p in paths:
         with open(p, encoding='utf-8', errors='replace') as f:
             for line in f:
+                if not TURN_LINE.search(line):
+                    continue
                 try:
                     e = json.loads(line)
                 except Exception:
@@ -205,12 +211,20 @@ def load(paths, until=None, since=None):
                 if since and t < since:
                     continue
                 e['_t'] = t
+                if e['type'] == 'user':
+                    # a tool result's text is all build() reads of it: a list's images (a contact sheet read back is
+                    # megabytes of base64) are let go here, line by line, not held to the end
+                    for x in (e.get('message') or {}).get('content') or []:
+                        if isinstance(x, dict) and x.get('type') == 'tool_result' and isinstance(x.get('content'), list):
+                            x['content'] = ' '.join(y.get('text', '') for y in x['content'] if isinstance(y, dict))
                 ents.append(e)
     ents.sort(key=lambda e: e['_t'])
     return ents
 
 
 def build(ents):
+    BG_DONE.clear()
+    NOT_CLASSED_BY.clear()
     calls = {}          # id -> dict
     order = []
     msgs = {}           # message id -> usage, t
@@ -305,18 +319,28 @@ def account(runs, calls, order):
             if k['t_res']:
                 evs.add(min(k['t_res'], r['t1']))
         evs = sorted(evs)
+        # one sweep over the intervals: the calls started by each midpoint come in by start time and leave when they end;
+        # the next call to be emitted is the first, by (emit time, order), not yet passed; ties go to the earlier call
+        # as min() over cs in order gave them
+        by_start = sorted(cs, key=lambda k: k['t_start'])
+        by_emit = sorted(range(len(cs)), key=lambda i: (cs[i]['t_emit'], i))
+        started, emitted, running = 0, 0, []
         for a, b in zip(evs, evs[1:]):
             if b <= a:
                 continue
             mid = (a + b) / 2
-            running = [k for k in cs if k['t_start'] <= mid and (k['t_res'] or r['t1'] + 1) > mid]
+            while started < len(by_start) and by_start[started]['t_start'] <= mid:
+                running.append(by_start[started])
+                started += 1
+            running = [k for k in running if (k['t_res'] or r['t1'] + 1) > mid]
             if running:
                 for k in running:
                     k['tool_s'] += (b - a) / len(running)
             else:
-                nxt = [k for k in cs if k['t_emit'] >= b - 1e-6]
-                if nxt:
-                    min(nxt, key=lambda k: k['t_emit'])['model_s'] += b - a
+                while emitted < len(by_emit) and cs[by_emit[emitted]]['t_emit'] < b - 1e-6:
+                    emitted += 1
+                if emitted < len(by_emit):
+                    cs[by_emit[emitted]]['model_s'] += b - a
                 else:
                     reply[r['n']] += b - a
     return reply
@@ -386,10 +410,12 @@ def auto_episodes(order, calls, texts):
     if cur:
         eps.append(cur)
     out = []
+    text_t = [t for t, _ in texts]      # in time order, as the entries were
     for e in eps:
         t0 = calls[order[e[0]]]['t_emit']
         t1 = calls[order[e[-1]]]['t_res'] or t0
-        lab = next((x for t, x in texts if t0 - 60 <= t <= t1), '')
+        i = bisect.bisect_left(text_t, t0 - 60)
+        lab = texts[i][1] if i < len(texts) and texts[i][0] <= t1 else ''
         ks = [calls[order[i]] for i in e]
         pages = sum(1 for k in ks if k['cls'] in ('read', 'deliver', 'write') and any(str(f).lower().endswith('.md') for f in k['files']))
         if sum(1 for k in ks if k['cls'] == 'agents') * 2 >= len(ks):
@@ -455,12 +481,51 @@ def queue_seconds(res, seen):
     return q
 
 
+def _heavy_source(cid, k):
+    inp = k.get('input') or {}
+    if inp.get('task_id'):
+        return ('task', str(inp['task_id']))
+    if k.get('cls') == 'read':
+        paths = list(k.get('files') or [])
+        if not paths and inp.get('command'):
+            paths = re.findall(r'[\w./:\\-]+\.(?:output|log|txt)\b', inp['command'], re.I)
+        if paths:
+            return ('files', tuple(os.path.normcase(os.path.normpath(str(f))) for f in paths))
+        if inp.get('command'):
+            return ('cmd', inp['command'].strip())
+    return ('call', cid)
+
+
+def heavy_seconds(res, prior):
+    """Scheduled heavy.py wait seconds a step's output reports, given what earlier reads of the same output saw (`prior`,
+    kept per output: its lines and the last wait read). A wait's lines count up ("waited 30 s", then "waited 60 s"), so
+    only the rise since the last line read counts, across reads as within one: a tail read twice while the job waited
+    had counted 30 + 60 for a 60-second wait (a review's finding). A line read before adds nothing; a wait that starts
+    again lower is the next heavy.py job, and adds its own: a line is known by its job's place in the read as well as
+    its text, since two jobs that waited alike print the same lines (the second's had been taken for the first's)."""
+    seen = prior.setdefault("lines", set())
+    h, job, before = 0.0, 0, None
+    for m in HEAVY_LINE.finditer(res):
+        line, n = m.group(0), int(m.group(1))
+        if before is not None and n < before:
+            job += 1
+        before = n
+        last = prior.get("last")
+        prior["last"] = n
+        if (job, line) in seen:
+            continue
+        seen.add((job, line))
+        h += n - last if last is not None and n > last else n
+    return h
+
+
 def split(order, calls, eps, cls, total_s):
     """Minutes in exclusive classes that add up to the total: each step's seconds (its tool time and the thinking that led
     to it) go to one class. Out of a step first come the render-queue and heavy-job seconds its own output reports
     (raea_run's, look's and heavy.py's lines; waits printed with no length can't be counted, so a lower bound), then a
     look's whole step is looking, then the rest goes by the episode's mark: making or rework (either side of the first full
     render), engine faults, reporting, other agents, pages, other waiting, not classed. Final replies are their own class."""
+    NOT_CLASSED_BY.clear()
     of_step = {}
     for e in eps:
         for i in range(e['first'], e['last'] + 1):
@@ -470,11 +535,12 @@ def split(order, calls, eps, cls, total_s):
                          "waiting_other", "not_classed"), 0.0)
     # the waits the tools printed, wherever they were read (a background render's output is read in a later, short step);
     # they happened while the maker waited, so they are taken out of the wait and render steps' time, earliest first
-    seen, queue, heavy = set(), 0.0, 0.0
+    seen, heavy_seen, queue, heavy = set(), {}, 0.0, 0.0
     for cid in order:
-        res = calls[cid].get('res') or ''
+        k = calls[cid]
+        res = k.get('res') or ''
         queue += queue_seconds(res, seen)
-        heavy += max((int(m.group(1)) for m in HEAVY_LINE.finditer(res)), default=0)
+        heavy += heavy_seconds(res, heavy_seen.setdefault(_heavy_source(cid, k), {}))
     taken = {}
     for i, cid in enumerate(order):
         k = calls[cid]
@@ -579,8 +645,11 @@ def main():
                          tok_in=t['input'], tok_cache_read=t['cache_read'], tok_cache_write=t['cache_write'],
                          tok_out=t['output'], tok_thinking=t['thinking'], api_messages=t['messages'],
                          prompt=clean(r['prompt'], 120)))
+    run_fields = ['run', 'start', 'end', 'start_l', 'end_l', 'wall_min', 'model_min', 'tool_min', 'steps',
+                  'renders', 'render_s', 'looks', 'bytes_written', 'tok_in', 'tok_cache_read', 'tok_cache_write',
+                  'tok_out', 'tok_thinking', 'api_messages', 'prompt']
     with open(os.path.join(a.out, 'runs.csv'), 'w', newline='', encoding='utf8') as f:
-        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        w = csv.DictWriter(f, fieldnames=run_fields)
         w.writeheader()
         w.writerows(rows)
 
@@ -619,8 +688,8 @@ def main():
             c = cls[key]
             s = c['tool_s'] + c['model_s']
             w.writerow([key, c['n'], c['renders'], round(c['tool_s'] / 60, 2), round(c['model_s'] / 60, 2),
-                        round(s / 60, 2), round(s / total, 4), c['bytes'], round(after[key] / 60, 2)])
-        w.writerow(['TOTAL', len(order), '', '', '', round(total / 60, 2), 1.0, ''])
+                        round(s / 60, 2), round(s / total, 4) if total else 0.0, c['bytes'], round(after[key] / 60, 2)])
+        w.writerow(['TOTAL', len(order), '', '', '', round(total / 60, 2), 1.0 if total else 0.0, ''])
 
     # episodes
     eps = json.load(open(a.episodes, encoding='utf8')) if a.episodes else auto_episodes(order, calls, texts)

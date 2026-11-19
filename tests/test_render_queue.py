@@ -37,16 +37,63 @@ SECOND = (f"import sys, time; sys.path.insert(0, r'{TOOLS}'); import raea_run; t
           f"f = raea_run.one_at_a_time(wait=30, lock=r'{LOCK}'); print('got it after %.1f s' % (time.time() - t))")
 
 
+def waiting(child, timeout=30):
+    """The child's stderr lines up to and including its first "queue: waiting" line: it has tried the lock, found it
+    held and is waiting (the tests had slept a fixed 1.2 to 2.5 s for this). A child that never says so fails here:
+    at once when it ends without saying it, and it is ended and waited for."""
+    lines, said, done = [], threading.Event(), threading.Event()
+
+    def read():
+        try:
+            for line in child.stderr:
+                lines.append(line)
+                if "queue: waiting" in line:
+                    said.set()
+                    return
+        finally:
+            done.set()          # it said so, or its stderr ended without it: either way the wait below is over
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    done.wait(timeout)
+    if not said.is_set():
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=10)
+        reader.join(5)          # its stderr has ended with it; closed only after the reader has left it
+        end(child)
+        raise AssertionError(f"no 'queue: waiting' from the child (exit {child.returncode}, waited up to {timeout} s): {''.join(lines)}")
+    reader.join(5)              # nothing else reads its stderr once the caller goes on to communicate()
+    return "".join(lines)
+
+
+def end(*children):
+    """A failed check leaves no child behind: one still running is killed, and each is waited for."""
+    for c in children:
+        if c is None:
+            continue
+        if c.poll() is None:
+            c.kill()
+        c.wait(timeout=10)
+        for pipe in (c.stdout, c.stderr):
+            if pipe and not pipe.closed:
+                pipe.close()
+
+
 def test_a_second_render_waits_for_the_first():
     first = raea_run.one_at_a_time(wait=30, lock=LOCK)
     assert first is not None, "the queue is on unless RAEA_RUN_ALONE=0"
-    second = subprocess.Popen([sys.executable, "-c", SECOND], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env={**OTHER})
-    time.sleep(2.5)
-    assert second.poll() is None, "the second render should still be waiting while the first holds the machine"
-    first.close()                                          # the first render ends
-    out, err = second.communicate(timeout=30)
-    assert "got it after" in out and float(out.split()[3]) >= 2.0, out
-    assert "queue: waiting" in err and "held by" in err, "and it says what it is waiting for"
+    second = None
+    try:
+        second = subprocess.Popen([sys.executable, "-c", SECOND], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env={**OTHER})
+        said = waiting(second)
+        assert second.poll() is None, "the second render should still be waiting while the first holds the machine"
+        first.close()                                      # the first render ends
+        out, err = second.communicate(timeout=30)
+    finally:
+        first.close()
+        end(second)
+    assert "got it after" in out, out
+    assert "held by" in said + err, "and it says what it is waiting for"
 
 
 def test_a_waiting_look_goes_before_a_waiting_render():
@@ -55,14 +102,53 @@ def test_a_waiting_look_goes_before_a_waiting_render():
     code = lambda kind: (f"import sys, time; sys.path.insert(0, r'{TOOLS}'); import raea_run; "
                          f"f = raea_run.one_at_a_time(wait=30, lock=r'{lock}', kind='{kind}'); print(time.time(), flush=True); time.sleep(1.5)")
     first = raea_run.one_at_a_time(wait=30, lock=lock)
-    render = subprocess.Popen([sys.executable, "-c", code("render")], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env={**OTHER})
-    time.sleep(1.2)                                        # the render is already waiting when the look arrives
-    look = subprocess.Popen([sys.executable, "-c", code("look")], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env={**OTHER})
-    time.sleep(1.8)
-    first.close()
-    got_look, got_render = float(look.communicate(timeout=30)[0].split()[0]), float(render.communicate(timeout=30)[0].split()[0])
+    render = look = None
+    try:
+        render = subprocess.Popen([sys.executable, "-c", code("render")], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env={**OTHER})
+        waiting(render)                                    # the render is already waiting when the look arrives
+        look = subprocess.Popen([sys.executable, "-c", code("look")], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env={**OTHER})
+        waiting(look)
+        first.close()
+        got_look, got_render = float(look.communicate(timeout=30)[0].split()[0]), float(render.communicate(timeout=30)[0].split()[0])
+    finally:
+        first.close()
+        end(render, look)
     assert got_look < got_render, f"the look should hold the machine first (look {got_look:.2f}, render {got_render:.2f})"
     assert got_render - got_look >= 1.0, "and the render waits until the look has finished"
+
+
+def test_a_child_that_ends_without_waiting_is_noticed_at_once():
+    # a review's finding: a child that crashed before it reached the queue held the check for its whole 30 s
+    child = subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(3)"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    t0 = time.time()
+    try:
+        waiting(child, timeout=20)
+        raise RuntimeError("a child that never waited fails the check")
+    except AssertionError as e:
+        assert "exit 3" in str(e), e
+    assert time.time() - t0 < 10 and child.poll() == 3, f"noticed in {time.time() - t0:.1f} s, exit {child.poll()}"
+
+
+def test_a_failed_check_leaves_no_child_running():
+    # the same review: when the second wait failed, the first child and the lock stayed behind
+    started, real_popen, real_waiting, calls = [], subprocess.Popen, waiting, []
+
+    def popen(*a, **kw):
+        started.append(real_popen(*a, **kw))
+        return started[-1]
+
+    def fails_the_second_time(child, timeout=30):
+        calls.append(child)
+        if len(calls) == 2:
+            raise AssertionError("forced")
+        return real_waiting(child, timeout)
+    with patch.object(subprocess, "Popen", popen), patch.dict(globals(), {"waiting": fails_the_second_time}):
+        try:
+            test_a_waiting_look_goes_before_a_waiting_render()
+            raise RuntimeError("the forced failure fails the check")
+        except AssertionError as e:
+            assert "forced" in str(e), e
+    assert len(started) == 2 and all(c.poll() is not None for c in started), [c.poll() for c in started]
 
 
 def test_the_queue_can_be_turned_off():
@@ -93,6 +179,14 @@ class FakeChild:
             self.returncode = 0
         return self.returncode
 
+    def wait(self, timeout=None):
+        if self.poll() is not None:
+            return self.returncode
+        raea_run.time.sleep(1.0 if timeout is None else timeout)
+        if self.poll() is not None:
+            return self.returncode
+        raise subprocess.TimeoutExpired("raea", timeout)
+
     ends_at_once = True
 
 
@@ -118,7 +212,7 @@ class Clock:
 
 def no_raea():
     """Everything render() reaches outside Python, replaced, so nothing real runs."""
-    fake = SimpleNamespace(Popen=FakeChild, DEVNULL=subprocess.DEVNULL, STDOUT=subprocess.STDOUT)
+    fake = SimpleNamespace(Popen=FakeChild, DEVNULL=subprocess.DEVNULL, STDOUT=subprocess.STDOUT, TimeoutExpired=subprocess.TimeoutExpired)
     return [patch.object(raea_run, "subprocess", fake), patch.object(raea_run, "raea_binary", lambda: "raea"), patch.object(raea_run, "checked_binary", lambda say=True: "raea"),
             patch.object(raea_run, "binary_version", lambda path: raea_run.PIN),
             patch.object(raea_run, "die_with_us", lambda proc: None), patch.object(raea_run, "kill_tree", lambda proc: None)]
@@ -130,17 +224,29 @@ def test_a_direct_caller_waits_for_a_render():
     real = raea_run.one_at_a_time
     held = real(wait=30, lock=LOCK)
     FakeChild.started, FakeChild.ends_at_once, got = [], True, []
+    retried = threading.Event()
+
+    class Watched:          # the real clock, telling the test when the caller sleeps between tries of the held lock
+        def __getattr__(self, name):
+            return getattr(time, name)
+
+        def sleep(self, s):
+            retried.set()
+            time.sleep(s)
     with contextlib.ExitStack() as stack:
-        for p in no_raea() + [patch.object(raea_run, "one_at_a_time", lambda wait=3600.0, lock=None, **kw: real(wait=30, lock=LOCK))]:
+        for p in no_raea() + [patch.object(raea_run, "one_at_a_time", lambda wait=3600.0, lock=None, **kw: real(wait=30, lock=LOCK)),
+                              patch.object(raea_run, "time", Watched())]:
             stack.enter_context(p)
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "still.png"
             t = threading.Thread(target=lambda: got.append(raea_run.render(ENTRY, out, ["--frame", "0"])), daemon=True)
             t.start()
-            time.sleep(2.0)
-            assert not FakeChild.started, "a direct caller waits while another render holds the machine"
-            held.close()
-            t.join(30)
+            try:
+                assert retried.wait(30), "the caller found the machine held and waits"
+                assert not FakeChild.started, "a direct caller waits while another render holds the machine"
+            finally:
+                held.close()        # on a failed check too: the caller's thread gets the machine and ends
+                t.join(30)
     assert FakeChild.started and got, "and draws once the machine is free"
     again = real(wait=0.5, lock=LOCK)
     assert again is not None, "and lets the machine go when it's done"
@@ -178,6 +284,44 @@ def test_a_render_that_ends_while_waiting_is_not_a_stall():
             stack.enter_context(p)
         ok, _, msg, _ = raea_run.render(ENTRY, Path(tempfile.mkdtemp()) / "out.mp4", timeout=5.0, retries=0)
     assert ok and "APPLIED" in msg, f"a render that finished is a render that worked: {msg}"
+
+
+def test_a_child_that_ends_at_once_is_not_held_to_the_next_second():
+    # A3: render() waits on raea rather than sleeping a whole second, so a child that ends at once returns in < 0.2 s
+    import heavy
+
+    class QuickChild:
+        def __init__(self, args, stdout=None, **kw):
+            stdout.write("APPLIED quick\n")
+            stdout.flush()
+            self.pid, self.returncode, self._polls = 0, None, 0
+
+        def poll(self):
+            self._polls += 1
+            if self._polls > 1:
+                self.returncode = 0
+            return self.returncode
+
+        def wait(self, timeout=None):
+            self.returncode = 0
+            return 0
+
+    quick_ns = SimpleNamespace(Popen=QuickChild, DEVNULL=subprocess.DEVNULL, STDOUT=subprocess.STDOUT, TimeoutExpired=subprocess.TimeoutExpired)
+    with contextlib.ExitStack() as stack, tempfile.TemporaryFile() as held:
+        for p in no_raea() + [patch.object(raea_run, "subprocess", quick_ns), patch.object(raea_run, "LOCK", held)]:
+            stack.enter_context(p)
+        t0 = time.perf_counter()
+        ok_q, _, _, _ = raea_run.render(ENTRY, Path(tempfile.mkdtemp()) / "quick.mp4", timeout=5.0, retries=0)
+        dt_r = time.perf_counter() - t0
+    assert ok_q and dt_r < 0.2, f"raea_run.render returned in {dt_r:.3f} s"
+    # heavy.py's wrapper the same way: a job that ends at once is not held to the end of a one-second step (with or
+    # without --stall); the bound leaves room for Python's own start on a busy machine
+    for stall in (0.0, 180.0):
+        p_fast = subprocess.Popen([sys.executable, "-c", "pass"])
+        t0 = time.perf_counter()
+        rc, why = heavy.watch(p_fast, stall)
+        dt_h = time.perf_counter() - t0
+        assert rc == 0 and why is None and dt_h < 0.6, (stall, rc, why, dt_h)
 
 
 def test_a_clock_correction_does_not_end_the_wait():
@@ -267,8 +411,10 @@ def test_every_caller_is_refused_before_anything_is_deleted():
 
 
 def main():
-    for t in (test_a_second_render_waits_for_the_first, test_a_waiting_look_goes_before_a_waiting_render, test_the_queue_can_be_turned_off, test_a_direct_caller_waits_for_a_render,
-              test_the_command_line_takes_the_lock_once, test_a_render_that_ends_while_waiting_is_not_a_stall, test_a_clock_correction_does_not_end_the_wait,
+    for t in (test_a_second_render_waits_for_the_first, test_a_waiting_look_goes_before_a_waiting_render, test_a_child_that_ends_without_waiting_is_noticed_at_once,
+              test_a_failed_check_leaves_no_child_running, test_the_queue_can_be_turned_off, test_a_direct_caller_waits_for_a_render,
+              test_the_command_line_takes_the_lock_once, test_a_render_that_ends_while_waiting_is_not_a_stall, test_a_child_that_ends_at_once_is_not_held_to_the_next_second,
+              test_a_clock_correction_does_not_end_the_wait,
               test_where_raea_and_its_output_are, test_bad_arguments_delete_nothing, test_raeas_own_short_flags_reach_raea,
               test_every_caller_is_refused_before_anything_is_deleted):
         t()

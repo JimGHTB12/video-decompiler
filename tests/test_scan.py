@@ -124,8 +124,11 @@ def test_the_stretches_picked_hold_a_burst_of_motion():
         with tempfile.TemporaryDirectory() as tmp:
             a, b = int(2.5 * fps), int(3.5 * fps)
             clock = lambda f: 0.15 * f if f < a else 0.15 * a + 4 * (f - a) if f < b else 0.15 * a + 4 * (b - a) + 0.15 * (f - b)
-            got = scan.windows(film(Path(tmp) / "burst.mp4", fps, 6, clock=clock), fps, 3)
+            clip = film(Path(tmp) / "burst.mp4", fps, 6, clock=clock)
+            got = scan.windows(clip, fps, 3)
+            ranked = scan.windows(clip, fps, 5, ranked=True)
             assert len(got) == 3 and any(abs(t - 2.5) <= 2 / fps for t in got), f"{fps}: the burst at 2.5 s is picked: {got}"
+            assert abs(ranked[0] - 2.5) <= 2 / fps and sorted(ranked[:3]) == got, f"{fps}: ranked puts the burst first: {ranked}"
             assert got == sorted(got) and all(y - x >= 1.0 - 1e-9 for x, y in zip(got, got[1:])), f"in time order, not overlapping: {got}"
 
 
@@ -144,6 +147,33 @@ def test_a_film_whose_frames_are_not_evenly_spaced_is_told_its_seconds_can_be_of
         text, _ = scan.scan(odd)
         line = next((l for l in text.splitlines() if l.strip().startswith("timing:")), "")
         assert "not evenly spaced" in line and "frame numbers" in line and "-fps_mode cfr" in line, text
+
+
+def test_the_changes_and_the_one_probe_are_the_old_ones():
+    # C7: changes subtracts in uint8 and sums whole numbers, and scan asks ffprobe once for the rate, the average rate,
+    # the frame count and the sound; the changes must be the int16 means to the bit (including frames 0 and 255 apart),
+    # and a file with no picture is refused in the same words rate() uses
+    rng = np.random.default_rng(9)
+    frames = [rng.integers(0, 256, (scan.H, scan.W)).astype(np.uint8) for _ in range(6)]
+    frames += [np.zeros((scan.H, scan.W), np.uint8), np.full((scan.H, scan.W), 255, np.uint8), np.zeros((scan.H, scan.W), np.uint8)]
+    with tempfile.TemporaryDirectory() as tmp:
+        clip = Path(tmp) / "exact.mkv"
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "gray", "-s", f"{scan.W}x{scan.H}", "-r", "30", "-i", "-",
+                        "-c:v", "ffv1", "-pix_fmt", "gray", str(clip)], input=b"".join(f.tobytes() for f in frames), check=True)
+        d, d2 = scan.changes(clip, two=True)
+        i16 = [f.astype(np.int16) for f in frames]
+        assert np.array_equal(d, [float(np.abs(i16[k + 1] - i16[k]).mean()) for k in range(len(i16) - 1)]), d
+        assert np.array_equal(d2, [float(np.abs(i16[k + 2] - i16[k]).mean()) for k in range(len(i16) - 2)]), d2
+        assert scan.probe(clip)[:2] == (scan.rate(clip), scan.uneven(clip, scan.rate(clip))) and scan.probe(clip)[3] == scan.has_sound(clip)
+        sound = Path(tmp) / "sound.wav"
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=d=1", str(sound)], check=True)
+        said = []
+        for read in (scan.rate, scan.probe):
+            try:
+                read(sound)
+            except SystemExit as e:
+                said.append(str(e))
+        assert len(said) == 2 and said[0] == said[1] and "no video stream" in said[0], said
 
 
 if __name__ == "__main__":

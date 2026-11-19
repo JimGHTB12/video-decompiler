@@ -18,6 +18,7 @@ A film folder is the nearest folder at or above the working directory that holds
 """
 import argparse
 import contextlib
+import functools
 import hashlib
 import json
 import os
@@ -38,7 +39,6 @@ KINDS = ("explainer", "launch", "vertical", "app")
 PAGE_FILMS = {"app": "app.tsx"}
 PY = sys.executable
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0
-ENGINE_NOTE = Path(os.environ["VD_ENGINE_NOTE"]) if os.environ.get("VD_ENGINE_NOTE") else None   # a note saying how to reach a stay-open look server, if a machine has one
 SR = 48000
 # The one level every film is held to, by vd sound, the scan after export and the pages: -15 LUFS within 1 LU either way,
 # true peak under -1 dB. vd sound said "aim -14" while the scan and the pages said -15. The mix is levelled with a true
@@ -49,7 +49,14 @@ LUFS_AIM, LUFS_WITHIN, PEAK_UNDER, PEAK_BUILD = -15.0, 1.0, -1.0, -2.5
 # .ts/.tsx/.js/.json/.css under the entry's folder, so one manifest written beside the film (raea writes OUT.render.json
 # next to every output) forces the next look or render to copy and rewrite the whole SDK again (+3-4 s, 20 s under load,
 # measured here).
-OUTROOT = Path(os.environ.get("VD_OUT") or Path.home() / ".vd" / "out")
+def vd_home():
+    """The root for usage.log, measures and default outputs: Path(VD_OUT).parent when VD_OUT is set, else ~/.vd."""
+    vd_out = os.environ.get("VD_OUT")
+    return Path(os.path.abspath(vd_out)).parent if vd_out else Path.home() / ".vd"
+
+
+OUTROOT = Path(os.environ.get("VD_OUT") or vd_home() / "out")
+WORKED_SOUND = ".worked-sound"   # under OUTROOT: worked films' sound.py outputs, keyed by every input and ffmpeg
 
 
 OWNER = "film-folder.txt"   # in a film's output folder: the film folder it belongs to
@@ -163,7 +170,7 @@ def outdir(d):
                 aside = next(o / "earlier-folder" / str(n) for n in range(1, 10000) if not (o / "earlier-folder" / str(n)).exists())
                 drawn = [f for f in o.glob("*.picture.mp4") if is_drawn(f)]
                 undrawn = [f for f in o.glob("*.picture.mp4") if f not in drawn]
-                keep = [*o.glob("evolve-*-KEY.txt"), *o.glob("evolve-*-divergence.json"), o / "bridge", o / "cuts",
+                keep = [*o.glob("pack-*-KEY.txt"), *o.glob("evolve-*-KEY.txt"), *o.glob("evolve-*-divergence.json"), o / "bridge", o / "cuts",
                         *hand_in_files(o / f"{d.name}.mp4"), *undrawn, *(picture_note(f) for f in undrawn)]
                 for f in keep:
                     if os.path.lexists(f):
@@ -190,7 +197,7 @@ def outdir(d):
                              "Nothing was changed.") from None
         print(f"vd: {o} held the outputs of another film folder called {d.name} ({was}). It is this folder's now: the picture and sound kept there for "
               "reuse and its scan were dropped, so none of the other film's is taken for this one's; its cuts, latest film, share copy, sheets, "
-              "timelines and evolve keys are in earlier-folder/N/, and this folder's cuts start again at 1. "
+              "timelines, pack and evolve keys are in earlier-folder/N/, and this folder's cuts start again at 1. "
               "Two films on one machine want two names.", file=sys.stderr, flush=True)
     return o
 
@@ -207,7 +214,7 @@ def write_if_changed(path, text):
 
 def usage_log(cmd, film, seconds, path=None):
     """One line a command: ISO time, command, film folder, seconds. Never fails the command it records."""
-    path = Path(path) if path else Path.home() / ".vd" / "usage.log"
+    path = Path(path) if path else vd_home() / "usage.log"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as fh:
@@ -217,25 +224,6 @@ def usage_log(cmd, film, seconds, path=None):
 
 
 NOT_PROVEN = {"borrow", "capture", "launch", "foley", "evolve", "playable", "audio", "bridge"}   # SKILL.md, "Newer commands"
-LEAN_ONLY = {"look", "export", "pack", "pin", "profile", "scan", "clean", "borrow", "steal", "capture", "launch", "foley", "evolve", "playable", "audio", "bridge"}
-
-
-def claims(argv):
-    """Whether a `vd` command line is one of the lean commands (the old ones keep their own meaning)."""
-    if not argv:
-        return False
-    cmd, rest = argv[0], argv[1:]
-    if cmd in LEAN_ONLY:
-        return True
-    if cmd == "new":
-        return any(r in ("--kind", "--like") or r.startswith(("--kind=", "--like=")) for r in rest)
-    if cmd == "render":
-        return "--from" in rest or "--to" in rest
-    if cmd == "measure":
-        return "--against" in rest or any(r.lower().endswith((".mp4", ".mov", ".mkv")) for r in rest)
-    if cmd == "sound":
-        return "--onto" in rest or any(r.lower().endswith((".tsx", ".ts", ".jsx")) for r in rest) or ("--palette" not in rest and "--project" not in rest and film_dir(None, required=False) is not None)
-    return False
 
 
 # ---------------------------------------------------------------- the film folder
@@ -387,12 +375,30 @@ def room(entry, need_gb, what, out=None):
         return
     def size(folder):
         return sum(f.stat().st_size for f in folder.rglob("*") if f.is_file()) / 1e9
-    big = sorted(((size(f), f) for f in OUTROOT.iterdir() if f.is_dir()), reverse=True)[:3] if OUTROOT.is_dir() else []
+    big = sorted(((size(f), f) for f in OUTROOT.iterdir() if f.is_dir() and f.name != WORKED_SOUND), reverse=True)[:3] if OUTROOT.is_dir() else []
     raise SystemExit(f"stopped before the render queue: {', '.join(f'{k} has {v:.1f} GB free' for k, v in low.items())}, and this {what} needs "
                      f"about {need_gb:.1f} GB (estimated: 5 MB a second of film for each of the picture, the film and its share copy, "
                      f"and 1 GB for raea's own temporary files). The largest folders under {OUTROOT}: "
                      + (", ".join(f"{f.name} ({g:.1f} GB)" for g, f in big) or "none")
                      + ". The skill keeps no frame folders; a filed cut's folder there can go once its film is kept elsewhere.")
+
+
+THREE_D = re.compile(r"""["']raea/(?:3d|mesh|camera|light|pbr|transform)\b""")
+
+
+def has_3d(folder):
+    """Whether a film's code imports any of raea's 3D parts (the stubs vd writes aside). What scene lint and a world's
+    shapes check is 3D only; on a page film scene lint says "has no 3D" and stops."""
+    for here, dirs, names in os.walk(folder):
+        dirs[:] = [x for x in dirs if x not in ("out", "__pycache__", "node_modules", ".git")]
+        for n in names:
+            if n.endswith((".ts", ".tsx", ".js", ".jsx")) and n not in STUBS:
+                try:
+                    if THREE_D.search(Path(here, n).read_text(encoding="utf-8", errors="replace")):
+                        return True
+                except OSError:
+                    return True                       # unread is not known to be flat: checked as before
+    return False
 
 
 def must_preflight(entry, comp, frame=0, frames=None, fps=None):
@@ -460,6 +466,67 @@ def hand_in(dest):
     return share, sheets_of(dest)
 
 
+def hand_in_record(cut, pic):
+    """What a picture's note keeps of the hand-in last made from it: the cut, the picture as it was, and the share copy
+    and each sheet as written, so a later export of the same picture knows they are still those files. None when the
+    hand-in is not all there."""
+    share = cut.with_name(cut.stem + "-share.mp4")
+    sheets = sheets_of(cut)
+    if not share.is_file() or not sheets:
+        return None
+    return {"cut": cut.name, "drawn": drawn_record(pic), "share": drawn_record(share), "sheets": {p.name: drawn_record(p) for p in sheets}}
+
+
+def note_hand_in(cut, pic):
+    """Keep in the picture's note the hand-in just made of `cut`, when the cut was made of the picture as drawn."""
+    if not is_drawn(pic):
+        return
+    record = hand_in_record(cut, pic)
+    if record:
+        try:
+            seen = json.loads(picture_note(pic).read_text(encoding="utf-8"))
+            picture_note(pic).write_text(json.dumps({**seen, "hand_in": record}), encoding="utf-8")
+        except (OSError, ValueError):
+            pass
+
+
+def hand_in_again(cut, pic):
+    """cut's hand-in from the one last made of the same picture, when the note says it is still there as written:
+    the share copy's video (x264 of the very frames this cut copies from the picture) stream-copied under this cut's
+    sound, and the sheets (pictures alone) copied. A remixed export re-encoded the whole film at -preset slow and
+    decoded it again for the sheets. (share, sheets), or None to make them afresh."""
+    try:
+        seen = json.loads(picture_note(pic).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    last = seen.get("hand_in") if isinstance(seen, dict) else None
+    if not isinstance(last, dict) or seen.get("drawn") != drawn_record(pic) or last.get("drawn") != seen.get("drawn"):
+        return None
+    try:
+        prev = cut.with_name(str(last.get("cut")))
+    except ValueError:      # a damaged note: no name, or a path where a name belongs
+        return None
+    prev_share = prev.with_name(prev.stem + "-share.mp4")
+    prev_sheets = sheets_of(prev)
+    try:
+        if prev == cut or drawn_record(prev_share) != last.get("share") or {p.name: drawn_record(p) for p in prev_sheets} != last.get("sheets"):
+            return None
+    except OSError:
+        return None
+    share = cut.with_name(cut.stem + "-share.mp4")
+    try:
+        run(["ffmpeg", "-y", "-v", "error", "-i", prev_share, "-i", cut, "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", "-movflags", "+faststart", share],
+            check=True, capture_output=True)
+    except subprocess.CalledProcessError:
+        share.unlink(missing_ok=True)       # a share copy that will not stream-copy (damaged since) is made afresh
+        return None
+    for old in sheets_of(cut):
+        old.unlink()
+    for p in prev_sheets:
+        shutil.copy2(p, cut.with_name(cut.stem + p.name[len(prev.stem):]))
+    return share, sheets_of(cut)
+
+
 def sheets_of(film):
     """FILM's timed sheets beside it, NAME-sheet.jpg or NAME-sheet_NNN.jpg, matched as text: a glob built from the name
     took another film's sheets when the name held [ or ? (draft[1] matched draft1), a review's finding."""
@@ -467,10 +534,17 @@ def sheets_of(film):
     return sorted(_named(film.parent, film.stem, r"-sheet(_\d+)?\.jpg"))
 
 
+def checked_raea_env():
+    """RAEA_BIN for a child tool, when this process has already found and checked raea (preflight) and none was set: the
+    child then asks that one binary its version instead of walking ~/.raea and asking every raea there again."""
+    found = getattr(sys.modules.get("raea_run"), "_FOUND", None)
+    return {"RAEA_BIN": found[0]} if found and not os.environ.get("RAEA_BIN") else {}
+
+
 def raea_render(d, entry, out, *flags, env=None):
     """One render through the machine's queue (raea_run.py). Returns (ok, seconds, last line)."""
     t0 = time.monotonic()
-    p = streamed([PY, "-X", "utf8", TOOLS / "raea_run.py", entry, "-o", out, *flags], cwd=d, env={**os.environ, **(env or {})})
+    p = streamed([PY, "-X", "utf8", TOOLS / "raea_run.py", entry, "-o", out, *flags], cwd=d, env={**os.environ, **checked_raea_env(), **(env or {})})
     lines = [l for l in p.stdout.splitlines() if l.strip()] or [l for l in p.stderr.splitlines() if l.strip()]
     return p.returncode == 0, time.monotonic() - t0, (lines[-1] if lines else "")
 
@@ -497,24 +571,102 @@ def copy_any(src, dst):
 IMPORT = re.compile(r"""(?:from|import)\s+["'](\.[^"']+)["']""")
 
 
+IMPORT_ENDS = ("", ".ts", ".tsx", ".js", "/index.ts", "/index.tsx")
+
+
 def resolves(f, spec):
     base = (f.parent / spec).resolve()
-    return any(Path(str(base) + ext).is_file() for ext in ("", ".ts", ".tsx", ".js", "/index.ts", "/index.tsx"))
+    return any(Path(str(base) + ext).is_file() for ext in IMPORT_ENDS)
+
+
+def is_code(name):
+    return os.path.normcase(name).endswith((".ts", ".tsx"))
+
+
+def import_target(f, spec, have, root):
+    """The file a relative import in `f` (a path under the film folder `root`, kit/...) names: inside kit/, the one in
+    `have` (normcased film-relative paths, not yet on disk), else on disk under `root`. None when there is none."""
+    inside = os.path.normcase("kit" + os.sep)
+    # the import's path is made whole before an ending is added, as resolves() does: ".." then ".ts" names the kit.ts
+    # beside kit/, where "kit/lib/.." + ".ts" would name nothing
+    base = os.path.normpath(os.path.join(os.path.dirname(f), spec))
+    for end in IMPORT_ENDS:
+        at = os.path.normpath(base + end)
+        if os.path.normcase(at).startswith(inside):
+            if os.path.normcase(at) in have:
+                return os.path.normcase(at)
+        elif (root / at).is_file():
+            return at
+    return None
+
+
+def unresolved(code, files, root):
+    """Which of `code` ({kit/ path: its relative imports}) can't resolve, followed through: a file is dropped when an
+    import names nothing in `files` (the kit/ paths there are) or, outside kit/, nothing on disk under `root`, round by
+    round until none is left. Sorted, relative to kit/."""
+    have = {os.path.normcase(os.path.normpath(f)) for f in files}
+    live, gone = dict(code), []
+    while True:
+        bad = [f for f, specs in live.items() if any(import_target(f, spec, have, root) is None for spec in specs)]
+        if not bad:
+            return sorted(gone)
+        for f in bad:
+            gone.append(f[len("kit/"):])
+            del live[f]
+            have.discard(os.path.normcase(os.path.normpath(f)))
+
+
+def kit_plan(film_dir):
+    """What PAGE_KIT puts in film_dir/kit, planned before anything is written: ({kit/ path: source file}, dropped), the
+    files whose imports can't resolve left out, as prune_unresolved would remove them once copied (and each new file
+    was opened again, round after round, a virus scan on each first open)."""
+    files = {}
+    for name, src in PAGE_KIT.items():
+        if src.is_dir():
+            for folder, dirs, names in os.walk(src):
+                dirs[:] = [x for x in dirs if x != "__pycache__"]
+                for n in names:
+                    files[f"kit/{name}/" + Path(folder, n).relative_to(src).as_posix()] = Path(folder, n)
+        else:
+            files[f"kit/{name}"] = src
+    code = {f: IMPORT.findall(src.read_text(encoding="utf-8", errors="replace")) for f, src in files.items() if is_code(f)}
+    dropped = unresolved(code, files, Path(film_dir))
+    for f in dropped:
+        del files["kit/" + f]
+    return files, dropped
+
+
+def kit_closure(plan, source, at, root):
+    """The kit/ paths in `plan` that `source` (the text of the file at kit/ path `at`) needs: what it imports, followed
+    through, and the files beside them that are not code (the faces' licence texts)."""
+    have = {os.path.normcase(os.path.normpath(f)): f for f in plan}
+    need, todo = set(), [(at, source)]
+    while todo:
+        f, text = todo.pop()
+        for spec in IMPORT.findall(text):
+            hit = have.get(import_target(f, spec, have, root))
+            if hit and hit not in need:
+                need.add(hit)
+                if is_code(hit):
+                    todo.append((hit, plan[hit].read_text(encoding="utf-8", errors="replace")))
+    folders = {os.path.dirname(f) for f in need}
+    return sorted(need | {f for f in plan if not is_code(f) and os.path.dirname(f) in folders})
 
 
 def prune_unresolved(kit):
     """Remove the kit files whose relative imports, followed through, can't resolve: some of the page library still
     imports what only the old outline-kit build made (fonts.gen, media.gen, outline.json) or parts the cut removed.
     A file that can't bundle is worse than no file. Returns what was removed, relative to the kit."""
-    gone = []
-    while True:
-        bad = [f for f in list(kit.rglob("*.ts")) + list(kit.rglob("*.tsx"))
-               if any(not resolves(f, spec) for spec in IMPORT.findall(f.read_text(encoding="utf-8", errors="replace")))]
-        if not bad:
-            return sorted(gone)
-        for f in bad:
-            gone.append(f.relative_to(kit).as_posix())
-            f.unlink()
+    kit = Path(kit)
+    files = {}
+    for folder, _, names in os.walk(kit):
+        for n in names:
+            files["kit/" + Path(folder, n).relative_to(kit).as_posix()] = Path(folder, n)
+    code = {f: IMPORT.findall(p.read_text(encoding="utf-8", errors="replace")) for f, p in files.items() if is_code(f)}
+    gone = unresolved(code, files, kit.parent)
+    for f in gone:
+        (kit / f).unlink()
+    return gone
 
 
 MADE = []   # what this command made; main prints the last one as the command's last line (one film's maker hunted for paths)
@@ -560,6 +712,79 @@ def files_now(d):
     return {p.relative_to(d).as_posix(): (p.stat().st_mtime_ns, p.stat().st_size) for p in d.rglob("*") if p.is_file()}
 
 
+@functools.lru_cache(maxsize=1)
+def ffmpeg_version():
+    """First line of `ffmpeg -version`, for cache keys whose output ffmpeg shaped."""
+    try:
+        p = subprocess.run(["ffmpeg", "-hide_banner", "-version"], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
+    except OSError:
+        return ""
+    return (p.stdout.splitlines() or [""])[0].strip() if p.returncode == 0 else ""
+
+
+def worked_sound_key(d):
+    """Content key for a worked film's sound.py: Python, numpy, ffmpeg, sound.py, score.json, and media/sounds/*."""
+    try:
+        import numpy
+        np_ver = str(numpy.__version__)
+    except ImportError:
+        np_ver = ""
+    h = hashlib.sha256(b"worked-sound-v2\0")
+    for name, raw in [
+        ("python", ".".join(map(str, sys.version_info[:2])).encode("utf-8")),
+        ("numpy", np_ver.encode("utf-8")),
+        ("ffmpeg", ffmpeg_version().encode("utf-8")),
+        ("sound.py", (d / "sound.py").read_bytes()),
+        *([("score.json", (d / "score.json").read_bytes())] if (d / "score.json").is_file() else []),
+        *(
+            [(p.relative_to(d).as_posix(), p.read_bytes()) for p in sorted((d / "media" / "sounds").rglob("*")) if p.is_file()]
+            if (d / "media" / "sounds").is_dir() else []
+        ),
+    ]:
+        nb = name.encode("utf-8")
+        h.update(f"{len(nb)}:".encode() + nb + f"{len(raw)}:".encode() + raw)
+    return h.hexdigest()[:24]
+
+
+def _restore_worked_sound(entry, d):
+    """Restore cached sound.py outputs into `d` with fresh mtimes, returning (wrote, line) or None on a miss."""
+    try:
+        man = json.loads((entry / "manifest.json").read_text(encoding="utf-8"))
+        wrote, line = man["wrote"], man.get("line", "")
+        if not isinstance(wrote, list) or any(not (entry / "files" / rel).is_file() for rel in wrote):
+            return None
+        root = d.resolve()
+        for rel in wrote:
+            dst = (d / rel).resolve()
+            if not dst.is_relative_to(root):
+                return None
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(entry / "files" / rel, dst)
+            os.utime(dst, None)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return wrote, line
+
+
+def _save_worked_sound(entry, d, wrote, line):
+    """Publish sound.py's outputs under `entry` via `.part.<pid>` so concurrent copies never read a half-written cache."""
+    part = entry.with_name(f"{entry.name}.part.{os.getpid()}")
+    shutil.rmtree(part, ignore_errors=True)
+    try:
+        (part / "files").mkdir(parents=True, exist_ok=True)
+        for rel in wrote:
+            dst = part / "files" / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(d / rel, dst)
+        (part / "manifest.json").write_text(json.dumps({"wrote": wrote, "line": line}), encoding="utf-8")
+        if entry.exists() and not (entry / "manifest.json").is_file():
+            shutil.rmtree(entry, ignore_errors=True)
+        os.replace(part, entry)
+    except OSError:
+        shutil.rmtree(part, ignore_errors=True)
+
+
 def cmd_new_like(a):
     """A copy of a whole worked film. Its sound.py, when it has one, runs in the copy (the wav is not shipped, and every worked
     film's sound.py also writes the times its picture imports); the one wav it writes under media/ becomes the score's sound_file,
@@ -576,14 +801,22 @@ def cmd_new_like(a):
     give_notice(d)
     print(f"film folder {d}: a copy of {a.like}" + (f", {films[a.like]}" if films[a.like] != a.like else " (its README.md, once it has one, says what it is)"))
     if (d / "sound.py").exists():
-        before, t1 = files_now(d), time.monotonic()
-        p = run([PY, "-X", "utf8", "sound.py"], cwd=d, capture_output=True, text=True, encoding="utf-8", errors="replace")
-        if p.returncode:
-            raise SystemExit(f"its sound.py failed after {time.monotonic() - t1:.1f} s (the copy is in {d}; fix and run `python sound.py` there):\n"
-                             + "\n".join((p.stdout + p.stderr).strip().splitlines()[-8:]))
-        after = files_now(d)
-        wrote = sorted(f for f, v in after.items() if before.get(f) != v)
-        print(f"sound.py ran in {time.monotonic() - t1:.1f} s and wrote {', '.join(wrote) or 'nothing'}" + (": " + p.stdout.strip().splitlines()[0][:160] if p.stdout.strip() else ""))
+        t1, cache = time.monotonic(), OUTROOT / WORKED_SOUND / worked_sound_key(d)
+        hit = _restore_worked_sound(cache, d)
+        if hit is not None:
+            wrote, line = hit
+            print(f"sound.py (cached, {time.monotonic() - t1:.1f} s) wrote {', '.join(wrote) or 'nothing'}" + (f": {line}" if line else ""))
+        else:
+            before = files_now(d)
+            p = run([PY, "-X", "utf8", "sound.py"], cwd=d, capture_output=True, text=True, encoding="utf-8", errors="replace")
+            if p.returncode:
+                raise SystemExit(f"its sound.py failed after {time.monotonic() - t1:.1f} s (the copy is in {d}; fix and run `python sound.py` there):\n"
+                                 + "\n".join((p.stdout + p.stderr).strip().splitlines()[-8:]))
+            after = files_now(d)
+            wrote = sorted(f for f, v in after.items() if before.get(f) != v)
+            line = p.stdout.strip().splitlines()[0][:160] if p.stdout.strip() else ""
+            _save_worked_sound(cache, d, wrote, line)
+            print(f"sound.py ran in {time.monotonic() - t1:.1f} s and wrote {', '.join(wrote) or 'nothing'}" + (f": {line}" if line else ""))
         wavs = [f for f in wrote if f.startswith("media/") and f.endswith(".wav")]
         if len(wavs) == 1 and (d / "score.json").exists():
             s = score_of(d)
@@ -613,9 +846,9 @@ def cmd_new(a):
         shutil.copy2(STARTER / f, d / f)
     bare = getattr(a, "bare", False) and a.kind != "app"     # the frame, the clock and the finish only, for a diagram
     shutil.copy2(STARTER / ("bare.tsx" if bare else PAGE_FILMS.get(a.kind, "film.tsx")), d / "film.tsx")
-    for name, src in PAGE_KIT.items():
-        copy_any(src, d / "kit" / name)
-    dropped = prune_unresolved(d / "kit")
+    plan, dropped = kit_plan(d)
+    for f, src in plan.items():
+        copy_any(src, d / f)
     if dropped:
         print(f"kit/: left out {len(dropped)} library files that import what this build doesn't make: {', '.join(dropped)}")
     score = json.loads((STARTER / "scores" / f"{a.kind}.json").read_text(encoding="utf-8"))
@@ -631,15 +864,6 @@ def cmd_new(a):
 
 # ---------------------------------------------------------------- look
 
-def stay_open_engine():
-    """A stay-open look server, when VD_ENGINE_NOTE names a note that says how to reach one. Otherwise None, and look
-    draws the ordinary way (one raea process for all the moments)."""
-    if not ENGINE_NOTE or not ENGINE_NOTE.exists():
-        return None
-    text = ENGINE_NOTE.read_text(encoding="utf-8", errors="replace")
-    m = re.search(r"(?mi)^look-server:\s*(\S+)", text)   # the line the engine note (VD_ENGINE_NOTE) is asked to carry
-    return m.group(1) if m else None
-
 
 def default_moments(score):
     """A moment early in each beat and one at its middle: where a viewer first sees the beat, and where it rests. A score
@@ -653,8 +877,16 @@ def default_moments(score):
 def cmd_look(a):
     d, entry, s = where(a)
     comp = a.composition or (s or {}).get("composition") or ("film" if s else None)
-    if a.at:
-        times = [float(x) for x in a.at.split(",")]
+    if a.at is not None:
+        parts = [x.strip() for x in a.at.split(",") if x.strip()]
+        if not parts:
+            raise SystemExit("vd look --at: give at least one moment in seconds, comma separated (as in --at 2,9,14)")
+        times = []
+        for x in parts:
+            try:
+                times.append(float(x))
+            except ValueError:
+                raise SystemExit(f"vd look --at: {x!r} is not a number of seconds (give moments comma separated, as in --at 2,9,14)") from None
     elif s:
         times = default_moments(s)
     else:
@@ -670,17 +902,19 @@ def cmd_look(a):
         print(f"look: sound.py changed after kit/times.gen.ts was made, so this picture is drawn from the beats as they were. To draw the new ones first:\n{run_sound_py(d)}",
               file=sys.stderr, flush=True)
     room(entry, 0.5, "look", out.parent)
-    must_preflight(entry, comp, frames[0], frames, fps)
     # the starter's film-look is the film without its grain: the masks keep only the frontmost layer, and a grain over
     # the whole frame blinded the report on every tile of a film that kept the starter's finish (seen on one film)
-    if comp and not a.composition and f'id={{`${{FILM_ID}}-look`}}' in entry.read_text(encoding="utf-8", errors="replace") and comp == "film":
+    if comp and not a.composition and 'id={`${FILM_ID}-look`}' in entry.read_text(encoding="utf-8", errors="replace") and comp == "film":
         comp = "film-look"
         print("look: drawn as film-look (the film without its grain, where it has one), so the report can see under it")
-    server = stay_open_engine()
-    if server:
-        print(f"the engine note names a stay-open look ({server}); this build of look does not speak it yet, so it draws the ordinary way")
+    # a page film's look skips the checks when the queue is free: they build a bundle look.py does not use (it draws
+    # --layers, cached apart) and step the frames it is about to draw, about 8 s after an edit, and a look that would be
+    # refused fails as quickly in look.py itself. With a queue to wait in, or 3D for scene lint to check, they run first
+    import raea_run
+    if has_3d(entry.parent) or not raea_run.queue_free():
+        must_preflight(entry, comp, frames[0], frames, fps)
     p = streamed([PY, "-X", "utf8", TOOLS / "look.py", entry, "--at", ",".join(map(str, frames)), "--frames", *(["--composition", comp] if comp else []), "-o", out,
-                  *(["--all"] if getattr(a, "all", False) else [])], cwd=d)
+                  *(["--all"] if getattr(a, "all", False) else [])], cwd=d, env={**os.environ, **checked_raea_env()})
     print(p.stdout.strip())                     # its stderr (the queue's waiting, raea's notes) was shown as it came
     if p.returncode == 0:
         made_it(out)
@@ -723,9 +957,47 @@ def made(kind, pitch, dur=None, seed=1):
     raise SystemExit(f"no made sound called {kind!r}: hit, tick, ping, whoosh or drone")
 
 
+def _wav_samples(path, start):
+    """An uncompressed 16-bit stereo WAV at SR read directly, as read_audio's ffmpeg command reads it: the same samples
+    (s16 / 32768) from the same first sample. None for any other file, where ffmpeg reads it: a mono file too, which
+    ffmpeg spreads to two channels at -3 dB in its own arithmetic. Every WAV VD writes is such a file, and the read is a
+    tenth of ffmpeg's start-up."""
+    import wave
+    import numpy as np
+    if Path(path).suffix.lower() != ".wav":
+        return None
+    # ffmpeg reads -ss as text to the microsecond (digits past the sixth are dropped; "1e-05" is refused), then starts
+    # at the sample nearest that time
+    whole, dot, frac = str(start).partition(".")
+    if not whole.isdigit() or (frac and not frac.isdigit()):
+        return None
+    us = int(whole) * 1_000_000 + int((frac + "000000")[:6])
+    first = (us * SR + 500_000) // 1_000_000
+    try:
+        with wave.open(str(path), "rb") as w:
+            if w.getcomptype() != "NONE" or w.getsampwidth() != 2 or w.getframerate() != SR or w.getnchannels() != 2:
+                return None
+            n = w.getnframes()
+            # a WAV written to a pipe leaves its sizes unfilled and says it holds 4 GB: ffmpeg reads those, as it did.
+            # Reading the frames the header claims asked for the 4 GB at once (MemoryError, a review's finding)
+            # One that says it holds nothing may hold sound all the same (a stream's header left at 0), which ffmpeg
+            # reads to the file's end: no frames read directly was silence where there was sound (the re-check's finding)
+            if n == 0 or n * 4 > Path(path).stat().st_size:
+                return None
+            w.setpos(min(n, first))
+            raw = w.readframes(n)
+    except (wave.Error, EOFError, OSError):
+        return None
+    x = np.frombuffer(raw[: len(raw) // 4 * 4], "<i2").astype(np.float32) * np.float32(1 / 32768)
+    return x.reshape(-1, 2).copy()
+
+
 def read_audio(path, start=0.0):
     """Any file ffmpeg reads, as stereo float32 at SR."""
     import numpy as np
+    fast = _wav_samples(path, start)
+    if fast is not None:
+        return fast
     p = run(["ffmpeg", "-v", "error", "-ss", str(start), "-i", path, "-vn", "-ac", "2", "-ar", str(SR), "-f", "f32le", "-"], capture_output=True)
     if p.returncode:
         raise SystemExit(f"ffmpeg could not read {path}: {p.stderr.decode(errors='replace')[-300:]}")
@@ -822,7 +1094,8 @@ def holes(env, win=0.01, floor=-50.0, longest=0.4, skip_end=0.3):
 
 def loudness(path):
     """(integrated LUFS, true peak dBTP) by ffmpeg's ebur128."""
-    p = run(["ffmpeg", "-hide_banner", "-nostats", "-i", path, "-af", "ebur128=peak=true", "-f", "null", "-"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+    # -vn skips decoding the picture when metering a finished .mp4
+    p = run(["ffmpeg", "-hide_banner", "-nostats", "-i", path, "-vn", "-af", "ebur128=peak=true", "-f", "null", "-"], capture_output=True, text=True, encoding="utf-8", errors="replace")
     i = re.findall(r"I:\s+(-?[\d.]+) LUFS", p.stderr)
     tp = re.findall(r"Peak:\s+(-?[\d.]+) dBFS", p.stderr)
     return (float(i[-1]) if i else None, float(tp[-1]) if tp else None)
@@ -1124,7 +1397,7 @@ TRIMS = (0.25, 0.5, 0.75, 1.0)   # dB, tried in turn when the encode lifts the t
 MARGIN_DB = 0.2                  # a trimmed file's peak must be this far under PEAK_UNDER: another decoder reads it a little differently
 
 
-def held_under_peak(pic, wav, part, tag601=True):
+def held_under_peak(pic, wav, part, tag601=True, metered=None):
     """The AAC encode lifts a mix's true peak, by how much depends on the mix and not smoothly on its level: Plus One's
     sound, -3.1 dBTP as a wav, came out at -0.6 (and at -0.6 again 0.5 dB lower, at -2.2 0.6 dB lower). So the encoded
     file is measured, and when its peak is not under PEAK_UNDER the sound is encoded again a little lower, the smallest
@@ -1132,13 +1405,19 @@ def held_under_peak(pic, wav, part, tag601=True):
     done, or None when nothing was needed (or nothing helped: the scan then names the fault)."""
     lufs, tp = loudness(part)
     if tp is None or tp < PEAK_UNDER:
+        if metered is not None:
+            metered[:] = [(lufs, tp)]
         return None
     for trim in TRIMS:
         mux(pic, wav, part, tag601=tag601, gain_db=-trim)
         l2, t2 = loudness(part)
         if not level_faults(l2, t2) and t2 < PEAK_UNDER - MARGIN_DB:
+            if metered is not None:
+                metered[:] = [(l2, t2)]
             return f"the AAC encode lifted the true peak to {tp:g} dBTP, so the sound is {trim:g} dB lower in this file ({l2:g} LUFS, {t2:g} dBTP)"
     mux(pic, wav, part, tag601=tag601)
+    if metered is not None:
+        metered[:] = [(lufs, tp)]
     return f"the AAC encode lifts the true peak to {tp:g} dBTP and no trim up to {TRIMS[-1]:g} dB brought it under {PEAK_UNDER:g} within the level: give the mix more headroom"
 
 
@@ -1150,17 +1429,38 @@ def join_report(film, joins, w=320, h=180):
     stretches popped at frames 270 and 360, cause not yet known; whatever the cause, this catches the seam. A lead-in
     before the range was tried and dropped: on a motion-blurred film a range from frame N matched a whole render for its
     first 3 frames without one, and differed from frame N+3 on (mean under 0.05) with 8 frames of lead-in or without."""
+    if not joins:
+        return "joins: none inside the film"
     import numpy as np
-    raw = run(["ffmpeg", "-v", "error", "-i", str(film), "-vf", f"scale={w}:{h}", "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True).stdout
-    n = len(raw) // (w * h)
-    f = np.frombuffer(raw[: n * w * h], dtype=np.uint8).reshape(n, h, w).astype(np.float32)
-    d = np.abs(f[1:] - f[:-1]).mean(axis=(1, 2))          # d[i]: the change into frame i + 1
+    import film_diff
+    # only the 13 frames round each join are decoded (the whole film was, every splice), each window from a seek half
+    # way back to its first frame and counted in the file's own frames, so a variable-rate film is not read at one rate
+    times, seekable = film_diff.packet_clock(film)
+    n = len(times)
+    spans = []
+    for j in sorted({j for j in joins if 0 < j < n}):
+        a, b = max(0, j - 6), min(n - 1, j + 6)
+        if spans and a <= spans[-1][1] + 1:
+            spans[-1][1] = b
+        else:
+            spans.append([a, b])
+    d = {}                                                    # d[i]: the change into frame i + 1
+    for a, b in spans:
+        # where the file can't be sought by frame (no packet times of its own), the window is picked by number from the start
+        pick = ["-ss", f"{film_diff.seek_frame(times, a):.6f}", "-i", str(film), "-vf", f"scale={w}:{h}"] if seekable else \
+            ["-i", str(film), "-vf", f"select='between(n\\,{a}\\,{b})',scale={w}:{h}"]
+        raw = run(["ffmpeg", "-v", "error", *pick, "-fps_mode", "passthrough", "-frames:v", str(b - a + 1), "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+                  capture_output=True).stdout
+        k = len(raw) // (w * h)
+        f = np.frombuffer(raw[: k * w * h], dtype=np.uint8).reshape(k, h, w).astype(np.float32)
+        for i, step in enumerate(np.abs(f[1:] - f[:-1]).mean(axis=(1, 2))):
+            d[a + i] = step
     said = []
     for j in joins:
-        if not 0 < j < n:
+        if not 0 < j < n or j - 1 not in d:
             continue
-        into, out = d[j - 1], (d[j] if j < len(d) else 0.0)
-        near = [d[i] for i in range(max(0, j - 6), min(len(d), j + 6)) if i not in (j - 1, j)]
+        into, out = d[j - 1], d.get(j, 0.0)
+        near = [d[i] for i in range(max(0, j - 6), j + 6) if i in d and i not in (j - 1, j)]
         base = max(float(np.median(near)) if near else 0.0, 0.15)
         if max(into, out) > 3 * base:
             said.append(f"frame {j} changes more than the frames round it ({max(into, out):.1f} against {base:.1f}): the film's own hit if something "
@@ -1247,10 +1547,14 @@ def cmd_render(a):
     part = out / f"range-{f0}-{f1}.mp4"
     stub = range_entry(d, s, f0, f1 - f0)
     must_preflight(stub, "range", 0)
+    pic = picture_path(out, d.name, entry_of(d), s.get("composition") or "film")   # what vd export rendered
+    mark = part.with_name(part.name + SPLICING)
+    if pic.exists():
+        # said before drawing, so vd clean can tell a part an interrupted splice left from a film that has its name
+        mark.write_text(json.dumps({"part": part.name, "picture": pic.name}), encoding="utf-8")
     ok, secs, line = raea_render(d, stub, part, "--quality", "master")
     if not ok:
         raise SystemExit(f"render failed: {line}")
-    pic = picture_path(out, d.name, entry_of(d), s.get("composition") or "film")   # what vd export rendered
     if not pic.exists():
         print(f"{part} ({f1 - f0} frames, {secs:.1f} s). There is no {pic} to splice into yet: `vd export` makes it.")
         made_it(part)
@@ -1260,6 +1564,9 @@ def cmd_render(a):
     # an encode of the whole picture: through heavy.py, which gives ffmpeg its turn in the queue at once and says what it waits for
     run([PY, "-X", "utf8", TOOLS / "heavy.py", "--stall", "180", "--", *splice_args(pic, part, tmp, f0, f1, total=total)], check=True)
     tmp.replace(pic)
+    part.unlink(missing_ok=True)
+    part.with_name(part.name + ".render.json").unlink(missing_ok=True)
+    mark.unlink(missing_ok=True)
     note = picture_note(pic)
     try:
         seen = json.loads(note.read_text(encoding="utf-8"))
@@ -1279,17 +1586,27 @@ def cmd_render(a):
 STUBS = ("_tone.tsx", "_range.tsx")
 
 
-def sources_newest(d):
-    # the two stubs this tool writes beside the entry are not sources; every other file is, a name starting "_" included
-    # (an edited _scene.tsx once left the old picture in place)
-    files = [p for p in d.rglob("*") if p.is_file() and "out" not in p.relative_to(d).parts and p.name not in STUBS]
-    return max((p.stat().st_mtime for p in files), default=0)
-
-
 def source_files(d):
-    """{relative path: [mtime, size]} of every source of the film's picture (the files sources_newest reads)."""
-    files = [p for p in d.rglob("*") if p.is_file() and "out" not in p.relative_to(d).parts and p.name not in STUBS]
-    return {p.relative_to(d).as_posix(): [round(p.stat().st_mtime, 3), p.stat().st_size] for p in files}
+    """{relative path: [mtime, size]} of every source of the film's picture: the two stubs this tool writes beside the
+    entry and out/ are left out; every other file is counted, a name starting '_' included (_scene.tsx)."""
+    d = Path(d)
+    out = {}
+    stack = [("", d)]
+    while stack:
+        prefix, cur = stack.pop()
+        try:
+            it = os.scandir(cur)
+        except OSError:
+            continue
+        with it:
+            for e in it:
+                if e.is_dir(follow_symlinks=False):
+                    if e.name != "out":
+                        stack.append((f"{prefix}{e.name}/", e.path))
+                elif e.name not in STUBS and e.is_file():
+                    st = e.stat()
+                    out[f"{prefix}{e.name}"] = [round(st.st_mtime, 3), st.st_size]
+    return out
 
 
 def picture_note(pic):
@@ -1318,7 +1635,7 @@ def is_drawn(pic):
         return False
 
 
-def picture_current(d, pic):
+def picture_current(d, pic, files=None):
     """(current, why not). The picture is current only when the film's sources are what it was drawn from, file for
     file: a newest-mtime test kept a picture after a scene it imported was deleted (no file left was newer), and a
     vd render splice made the whole picture look new though the frames outside the stretch came from older sources."""
@@ -1331,7 +1648,7 @@ def picture_current(d, pic):
         return False, "no record of what the picture was drawn from"
     if seen.get("spliced"):
         return False, f"frames {', '.join(f'{a}-{b - 1}' for a, b in seen['spliced'])} were spliced in from newer sources than the rest"
-    now = source_files(d)
+    now = source_files(d) if files is None else files
     if seen.get("files") != now:
         was = seen.get("files") or {}
         gone, new = sorted(set(was) - set(now)), sorted(set(now) - set(was))
@@ -1545,17 +1862,21 @@ def _export(a, cut=None, done=None):
         own_sound(d, s)                     # a stale or missing own mix stops the export before the picture's render
     if s and s.get("music"):            # with --sound too: the picture is timed on the beat as much as the sound is
         music_beat(d, s)                    # so does a mapped track whose beat sound.py has not yet made the film's
-    current, stale_why = picture_current(d, pic)
+    now = source_files(d)
+    current, stale_why = picture_current(d, pic, files=now)
     draw = a.again or not current
-    drawn_from = source_files(d) if draw else None     # the sources as the draw begins: an edit during it is caught next time
+    drawn_from = now if draw else None     # the sources as the draw begins: an edit during it is caught next time
     total, fps = export_frames(s, entry, comp) if draw else (None, (s or {}).get("fps"))
     # every export writes the cut, its share copy and (a link or a copy) the latest; drawing the picture needs the
     # picture's room and raea's own too
     dur = total / fps if total and fps else (s or {}).get("duration", 60)
-    more = (shutter_of(s, comp) or (None, 0, 0))[1]             # a shutter's many pictures a frame are a larger file while they last
+    shutter = shutter_of(s, comp)
+    more = (shutter or (None, 0, 0))[1]                         # a shutter's many pictures a frame are a larger file while they last
     room(entry, 1.0 + (5 + more) * 0.005 * dur if draw else 0.1 + 4 * 0.005 * dur, "export", dest.parent)
     if draw:
-        must_preflight(entry, comp, 0, spread(s, total=total) if total else None, fps)
+        pre_comp = shutter[0] if shutter else comp
+        pre_total = total * shutter[1] if shutter and total else total
+        must_preflight(entry, pre_comp, 0, spread(s, total=pre_total) if pre_total else None, fps * shutter[1] if shutter and fps else fps)
         # one pass: raea's ffmpeg media backend writes x264 at CRF 11 (master) as it draws. Measured on an earlier film (468 frames,
         # 3D): 43.7 s against 88.4 s for PNG frames plus 33.6 s to encode them, and as clean in the darks (mean luma error on
         # dark pixels of the 12 darkest frames 1.13 both, max 1.33 against 1.65). Its file is BT.601 and untagged: mux tags it.
@@ -1563,13 +1884,13 @@ def _export(a, cut=None, done=None):
         # drawn beside the picture and moved into place only whole: a render that fails part way (the disk full one night)
         # left a truncated picture that the next export of unchanged sources took as current
         part = pic.with_name(pic.stem + ".part.mp4")
-        shutter = shutter_of(s, comp)
         # with a shutter the engine draws the many-pictures composition into `drawn`, and blur.py averages it into `part`
         drawn = pic.with_name(pic.stem + ".pictures.part.mp4") if shutter else part
         ok, secs, line = raea_render(d, entry, drawn, *(["--composition", shutter[0] if shutter else comp] if shutter or comp else []), "--quality", "master",
                                      env={"RAEA_MEDIA": "ffmpeg"} if one_pass else None)
         if not ok:
             drawn.unlink(missing_ok=True)
+            drawn.with_name(drawn.name + ".render.json").unlink(missing_ok=True)
             raise SystemExit(f"render failed: {line}")
         w = split_wait(secs, line)
         waited = f" ({w[0]:.0f} s waiting in the queue, {w[1]:.0f} s rendering)" if w else ""
@@ -1579,14 +1900,17 @@ def _export(a, cut=None, done=None):
                 averaged(drawn, part, shutter[1], shutter[2], fps)
             except BaseException:
                 part.unlink(missing_ok=True)
+                part.with_name(part.name + ".render.json").unlink(missing_ok=True)
                 raise
             finally:
                 drawn.unlink(missing_ok=True)
+                drawn.with_name(drawn.name + ".render.json").unlink(missing_ok=True)
             said.append(f"picture drawn at {shutter[1]} pictures a frame in {secs:.1f} s{waited} and {shutter[2]} of each {shutter[1]} averaged in "
                         f"{time.monotonic() - t1:.1f} s (a camera's blur, score.json's shutter)")
         else:
             said.append(f"picture rendered once in {secs:.1f} s{waited}")
         part.replace(pic)
+        part.with_name(part.name + ".render.json").unlink(missing_ok=True)
         picture_note(pic).write_text(json.dumps({"files": drawn_from, "drawn": drawn_record(pic)}), encoding="utf-8")
         if stale_why and not a.again and stale_why != "no picture yet":
             said.append(f"(drawn again: {stale_why})")
@@ -1608,14 +1932,21 @@ def _export(a, cut=None, done=None):
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = cut.with_name(cut.stem + ".part.mp4")              # moved into place only when it is whole
     mux(pic, wav, part, tag601=True)
+    metered = []
     if part.exists():
-        trimmed = held_under_peak(pic, wav, part)
+        trimmed = held_under_peak(pic, wav, part, metered=metered)
         if trimmed:
             said.append(trimmed)
         if cut.exists():   # never written over: a filed cut is the ledger's (it cannot be here unless cut_of was wrong)
             raise SystemExit(f"stopped: {cut} is already there, so this export's film was not filed over it; nothing was replaced")
         part.replace(cut)
-    share, sheets = hand_in(cut)
+    # the picture as drawn (not redrawn, spliced or replaced since) gives the same share video and sheets as the last
+    # hand-in made from it: those are reused, under this cut's sound; any draw rewrites the note without them
+    again = None if draw or not is_drawn(pic) else hand_in_again(cut, pic)
+    share, sheets = again or hand_in(cut)
+    if again:
+        said.append("share copy and sheets reused from the last hand-in of this picture")
+    note_hand_in(cut, pic)
     done["cut"] = True
     # the latest: NAME.mp4 and its hand-in made the cut just finished, all of it only now
     for old in sheets_of(dest):
@@ -1627,18 +1958,20 @@ def _export(a, cut=None, done=None):
     print(f"this is cut {cut.stem.rsplit('-cut', 1)[1]}, kept as {cut} (its share copy and sheets beside it); {dest.name} is the latest cut")
     print(f"hand-in beside it: {dest.stem}-share.mp4 (the share copy) and {len(sheets)} timed sheets at 4 frames a second "
           f"({dest.stem + sheets[0].name[len(cut.stem):] if sheets else 'none'}{' ...' if len(sheets) > 1 else ''})")
-    done["scanned"] = scanned(dest, out / "scan.txt") is not None
+    # dest is a byte copy of the cut held_under_peak just metered, so hand that reading to scan instead of metering again
+    level = metered[0] if metered and metered[0] != (None, None) else None
+    done["scanned"] = (scanned(dest, out / "scan.txt", level=level) if level is not None else scanned(dest, out / "scan.txt")) is not None
     return dest
 
 
-def scanned(film, to, alone=False):
+def scanned(film, to, alone=False, level=None):
     """The scan of a finished film, printed and written to `to`. It never fails what it follows: a scan that cannot run
     says so, and writes that to `to` in place of the report before it, so the next step reads no old scan as this film's
     (a damaged export once passed a scan made from half its pictures, and a scan that failed left the last one there)."""
     t0 = time.monotonic()
     try:
         import scan
-        text, fixes = scan.scan(film, to)
+        text, fixes = scan.scan(film, to, level=level)
     except (Exception, SystemExit) as e:
         said = f"SCAN could not run on {Path(film).name}: {str(e)[-300:]}. " + ("Nothing was scanned (exit code 3)" if alone else
                 "The film is made but NOT scanned: nothing here says it is clean (an export ends with exit code 3 for this)")
@@ -1696,7 +2029,7 @@ def measures_of(film, cache_root=None, no_voice=False):
     with film.open("rb") as fh:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             h.update(chunk)
-    out = Path(cache_root or Path.home() / ".vd" / "measures") / (h.hexdigest()[:16] + ("-novoice" if no_voice else ""))
+    out = Path(cache_root or vd_home() / "measures") / (h.hexdigest()[:16] + ("-novoice" if no_voice else ""))
     if (out / "measures.json").exists() and not_transcribed(json.loads((out / "measures.json").read_text(encoding="utf-8"))) and transcriber() is None:
         print(f"{film.name} was measured when no transcriber was here; measuring it again for its words", flush=True)
         (out / "measures.json").unlink()
@@ -1909,7 +2242,8 @@ def pin_material(ref, out, cache_root=None, k=None):
     dst.mkdir(parents=True)
     for f in pack.pictures(src):
         shutil.copy2(f, dst / f.name)
-    pack.rest_keys(ref.resolve(), dst)
+    for f in sorted(pack.ref_keys(ref.resolve(), cache_root).glob("key-*.jpg")):   # made once, kept with the sheets
+        shutil.copy2(f, dst / f.name)
     return dst
 
 
@@ -1963,15 +2297,16 @@ NEW_CMD = re.compile(r"""(?:vd(?:\.py)?|\$\{?vd\}?)["']?\s+new\s+(?:"([^"]+)"|'(
 CD_CMD = re.compile(r"""(?:^|&&|;|\n)\s*cd\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))""")
 
 
-def made_here(line, d):
+def made_here(line, d, want=None):
     """Does this transcript line hold a `vd new FOLDER` whose folder, resolved against the command's own `cd` or the
     session's working folder, is the film `d`? A review's finding: matching the folder's name alone missed `vd new C:/films/quiet`
-    and accepted another folder's `new quiet`."""
+    and accepted another folder's `new quiet`. `want` is d resolved, when the caller has it already."""
     try:
         e = json.loads(line)
     except ValueError:
         return False
-    want = os.path.normcase(str(Path(d).resolve()))
+    if want is None:
+        want = os.path.normcase(str(Path(d).resolve()))
     for c in (e.get("message") or {}).get("content") or []:
         cmd = (c.get("input") or {}).get("command", "") if isinstance(c, dict) and c.get("type") == "tool_use" else ""
         for m in NEW_CMD.finditer(cmd):
@@ -1996,6 +2331,9 @@ def newest_transcript(d, days=7):
     key = str(d).replace("\\", "/").lower()
     keys = (key, key.replace("/", "\\\\"))
     cut = time.time() - days * 86400
+    # d resolved once: resolving it for every tool call of a session run in a folder named "New folder" (each line
+    # holds "new") took 7.6 s over 30,000 lines
+    want = os.path.normcase(str(Path(d).resolve()))
     files = sorted((p for p in root.rglob("*.jsonl") if p.stat().st_mtime >= cut), key=lambda p: -p.stat().st_mtime) if root.exists() else []
     named = None
     for p in files:
@@ -2007,7 +2345,7 @@ def newest_transcript(d, days=7):
                     if not seen and any(k in low for k in keys):
                         seen = True
                         named = named or p
-                    if '"tool_use"' in low and "new" in low and made_here(line, d):
+                    if '"tool_use"' in low and "new" in low and "vd" in low and made_here(line, d, want):
                         return p
         except OSError:
             pass
@@ -2019,7 +2357,13 @@ def newest_transcript(d, days=7):
 # picture it reuses (an export redraws it when absent), the note of what it was drawn from, and raea's per-part records.
 # Nothing else: folders such as sub/ or frames/ held finished films that nothing makes again, and files that vd sound
 # or vd look write without the lock could go mid-build (a review's findings).
-REBUILT = ("*.picture.mp4", "*.picture.mp4.sources.json", "*.part.render.json")
+# A range render is not matched by its name: range-*.mp4 is also the finished film of a film named range-demo, an
+# export named so, and a range rendered alone, and plain clean removed them (a review's finding). A range that vd render
+# meant to splice is named in a SPLICING file beside it until the splice is done; one an interrupted splice left goes
+# with that file (_rebuilt).
+REBUILT = ("*.picture.mp4", "*.picture.mp4.sources.json", "*.part.render.json", "*.part.mp4.render.json")
+SPLICING = ".splicing"
+SPLICE_PART = re.compile(r"range-\d+-\d+\.mp4")
 
 
 def _linked(p):
@@ -2066,6 +2410,18 @@ def _rebuilt(o):
                 if os.path.lexists(pic) and not is_drawn(pic):
                     continue
             out.append(f)
+    for mark in o.glob(f"range-*.mp4{SPLICING}"):
+        # a range part only when vd render recorded, before drawing it, that it was for a splice into this folder's picture
+        part = mark.with_name(mark.name[:-len(SPLICING)])
+        if not SPLICE_PART.fullmatch(part.name) or not mark.is_file() or _linked(mark):
+            continue
+        try:
+            said = json.loads(mark.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(said, dict) or said.get("part") != part.name:
+            continue
+        out += [f for f in (part, part.with_name(part.name + ".render.json")) if f.is_file() and not _linked(f)] + [mark]
     return out
 
 
@@ -2117,7 +2473,7 @@ def orphan_note(o):
 def _out_folder(name):
     """OUTROOT/NAME, for a NAME that is one folder in it and no link: clean reached outside VD_OUT through `../x`."""
     root = OUTROOT.resolve()
-    if not name or name in (".", "..") or any(c in name for c in "/\\:") or Path(name).name != name:
+    if not name or name in (".", "..", WORKED_SOUND) or any(c in name for c in "/\\:") or Path(name).name != name:
         raise SystemExit(f"vd clean: {name!r} is not the name of one folder in {OUTROOT}")
     o = OUTROOT / name
     if not o.is_dir() or _linked(o) or o.resolve().parent != root:
@@ -2149,7 +2505,7 @@ def cmd_clean(a):
     if a.names:
         folders = [_out_folder(n) for n in a.names]
     else:
-        folders = sorted(p for p in OUTROOT.iterdir() if p.is_dir() and not _linked(p)) if OUTROOT.is_dir() else []
+        folders = sorted(p for p in OUTROOT.iterdir() if p.is_dir() and p.name != WORKED_SOUND and not _linked(p)) if OUTROOT.is_dir() else []
     keep = set(a.keep or ())
     if keep:
         have = {int(m.group(2)) for f in ((folders[0] / "cuts").iterdir() if (folders[0] / "cuts").is_dir() else ())
@@ -2322,10 +2678,6 @@ def cmd_playable(a):
 def cmd_audio(a):
     """vd audio (not proven), from legible-film: clean a recorded voice (voice_clean.py), make a music track the film's
     beat (tempo_map.py: score.json's music, which the film's sound.py and the mix read), or draw a track's sound (listen.py)."""
-    import listen
-    import tempfile
-    import tempo_map
-    import voice_clean
     # cleaning a voice and mapping a track write into a film folder, so they need one; only the sheet can stand alone
     d = film_dir(a.film, required=getattr(a, "clean_voice", False) or getattr(a, "tempo_map", False))
     src = Path(a.track).resolve()
@@ -2340,6 +2692,8 @@ def cmd_audio(a):
         raise SystemExit(f"no such audio file: {src}")
     last_made = src
     if getattr(a, "clean_voice", False):
+        import tempfile
+        import voice_clean
         (d / "media").mkdir(parents=True, exist_ok=True)
         cleaned = Path(a.o).resolve() if getattr(a, "o", None) else (d / "media" / f"{src.stem}-clean.wav")
         if cleaned == src:
@@ -2380,6 +2734,7 @@ def cmd_audio(a):
             (d / "score.json").write_text(json.dumps(s, indent=1) + "\n", encoding="utf-8")
         last_made = cleaned
     if getattr(a, "tempo_map", False):
+        import tempo_map
         try:
             res, gen_path = tempo_map.compile_into_film(d, src, bpm=getattr(a, "bpm", None), drop_at_beat=getattr(a, "drop_at_beat", None),
                                                         replace=getattr(a, "replace_own_mix", False))
@@ -2399,12 +2754,14 @@ def cmd_audio(a):
                   f"from its first beat at {m['first_beat_s']:g} s.")
         last_made = gen_path
     if getattr(a, "sheet", False) or (not getattr(a, "clean_voice", False) and not getattr(a, "tempo_map", False)):
+        import listen
         # outside a film folder the sheet goes beside the track (it had made an output folder named after the folder run in)
         out_png = Path(o).resolve() if o else (outdir(d) / "listen-sheet.png" if d else src.with_name(f"{src.stem}-sheet.png"))
         cues = (gen_data(d).get("CUES") or []) if d else []
         heard = last_made if getattr(a, "clean_voice", False) and last_made.suffix.lower() == ".wav" else src   # the cleaned voice, when there is one
-        prof = listen.measure(heard)
-        sh = listen.sheet(heard, out_png, cues_list=cues)
+        samples = listen.decode_audio(heard)   # once: the measures, the sheet and its transcript read the same 48 kHz decode
+        prof = listen.measure(heard, samples=samples)
+        sh = listen.sheet(heard, out_png, cues_list=cues, samples=samples)
         m = prof["measurements"]
         print(f"listen: {m['integrated_lufs']} LUFS, {m['true_peak_dbtp']} dBTP, width {m['side_to_mid_db']} dB, corr {m['correlation']}; sheet -> {sh['png']}")
         last_made = Path(sh["png"])

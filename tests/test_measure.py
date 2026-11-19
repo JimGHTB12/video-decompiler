@@ -174,6 +174,35 @@ def keyframes_are_not_events():
         near = lambda t: any(abs(e - t) <= 1 / 30 + 1e-6 for e in m["events"])
         assert not any(near(t) for t in (1.0, 2.0, 3.0, 4.0)), f"a keyframe's compression step is no event: {m['events']}"
         assert near(2.5), f"a real change of the same size between keyframes still is: {m['events']}"
+        still = [(base + (i // 30) % 2).astype(np.uint8) for i in range(150)]
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "gray", "-s", "640x360", "-r", "30", "-i", "-",
+                        "-output_ts_offset", "0.5", "-c:v", "libx264", "-qp", "0", "-g", "30", "-keyint_min", "30", "-sc_threshold", "0",
+                        "-pix_fmt", "yuv420p", str(d / "offset.mp4")], input=np.stack(still).tobytes(), check=True)
+        run(d / "offset.mp4", "--out", d / "offset")
+        mo = json.loads((d / "offset" / "measure.json").read_text(encoding="utf-8"))
+        assert mo["events"] == [], f"keyframe steps on an offset file are not false events: {mo['events']}"
+        run(d / "offset.mp4", "--out", d / "offset_win", "--from", "0", "--to", "4.0")
+        mw = json.loads((d / "offset_win" / "measure.json").read_text(encoding="utf-8"))
+        assert mw["events"] == [], f"nor in a window cut from an offset file: {mw['events']}"
+        # a review's finding: with sound starting a second before the picture, the decode repeats the first picture back
+        # to 0, so the curve starts at the file's 0, not at the first picture's packet; keys placed from the packet were a
+        # second late and a still clip got a false event at 5.0. Sound after the picture, and preroll, the same.
+        stillmp4 = d / "still.mp4"
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "gray", "-s", "640x360", "-r", "30", "-i", "-",
+                        "-c:v", "libx264", "-qp", "0", "-g", "30", "-keyint_min", "30", "-sc_threshold", "0", "-pix_fmt", "yuv420p",
+                        str(stillmp4)], input=np.stack(still).tobytes(), check=True)
+        for name, picture_at, sound_at in (("sound_first", 1, 0), ("sound_after", 0, 1)):
+            clip = d / f"{name}.mkv"
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-itsoffset", str(picture_at), "-i", str(stillmp4), "-itsoffset", str(sound_at), "-f", "lavfi",
+                            "-t", "5", "-i", "anullsrc=r=48000:cl=stereo", "-c:a", "pcm_s16le", "-c:v", "copy", str(clip)], check=True)
+            run(clip, "--out", d / name)
+            ma = json.loads((d / name / "measure.json").read_text(encoding="utf-8"))
+            assert ma["events"] == [], f"keyframe steps where {name.replace('_', ' ')} are not events: {ma['events']}"
+        pre = d / "preroll.mp4"
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(stillmp4), "-c", "copy", "-output_ts_offset", "-0.1", "-avoid_negative_ts", "disabled", str(pre)], check=True)
+        run(pre, "--out", d / "preroll")
+        mp = json.loads((d / "preroll" / "measure.json").read_text(encoding="utf-8"))
+        assert mp["events"] == [], f"nor on a file with preroll before 0: {mp['events']}"
 
 
 def measure_version():
@@ -358,9 +387,139 @@ def tempo_known():
         assert 56.0 < t["octave"][0] < 57.0 and 224.0 < t["octave"][1] < 226.0, f"its half and double are named as the octave it can't rule out: {t}"
 
 
+def batched_seeks_stay_exact_and_under_select_limit():
+    """measure.sheet and hold grabs fetch stills in batches under ffmpeg's ~100-term select limit and 32k command line,
+    landing on the exact frame across batch boundaries on both constant- and variable-rate clips."""
+    import importlib.util
+    from unittest.mock import patch
+    import numpy as np
+    from PIL import Image
+    sys.path.insert(0, str(TOOLS))
+    import film_diff
+    import measure
+    spec = importlib.util.spec_from_file_location("test_seek", Path(__file__).with_name("test_seek.py"))
+    seek = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(seek)
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        cfr = seek.numbered(d / "cfr.mp4", 30, n=150)
+        ct, ok = film_diff.packet_clock(cfr)   # as measure.measure reads it: the clock and whether it can be sought by
+        # 110 stills: past ffmpeg's ~100-term select parser limit, split into batches of <= BATCH
+        picks = list(range(5, 115))
+        ts = [round(f / 30, 3) for f in picks]
+        (d / "sh").mkdir()
+        real_run, cmds = measure.subprocess.run, []
+        with patch.object(measure.subprocess, "run", lambda cmd, **kw: (cmds.append([str(x) for x in cmd]), real_run(cmd, **kw))[1]):
+            files = measure.sheet(cfr, ts, d / "sh", 30.0, ct, ok)
+        assert len(cmds) <= (len(picks) + 47) // 48 and len(cmds) < 10, f"110 sheet tiles fetched in {len(cmds)} batched ffmpeg calls, not one per tile"
+        assert all(sum(len(x) + 1 for x in c) < 8000 and x_terms <= 60 for c in cmds for x_terms in [sum(s.count("eq(n") for s in c)]), cmds
+        # Check tiles across batch boundaries (0, 47, 48, 95, 96, 109) show the exact frame (avoiding top-left 70x16 label)
+        for idx in (0, 47, 48, 95, 96, 109):
+            with Image.open(d / "sh" / files[idx // 40]) as board:
+                k = idx % 40
+                tile = np.asarray(board.crop(((k % 5) * 320, (k // 5) * 180, (k % 5 + 1) * 320, (k // 5 + 1) * 180)).convert("L"))
+                assert seek.index_of(tile) == picks[idx], f"tile {idx} showed frame {seek.index_of(tile)}, not {picks[idx]}"
+        # Variable-rate clip: batched grabs across rate step (frames 28, 30, 60) land on exact frames
+        vfr = seek.numbered(d / "vfr.mp4", 60, n=90, pts="if(lt(N,30),N/30,1+(N-30)/60)")
+        vt = film_diff.clock(vfr)
+        got = [seek.index_of(np.mean(im, axis=2)) for im in measure.grabs(vfr, [vt[28], vt[30], vt[60]], vt)]
+        assert got == [28, 30, 60], f"batched grabs on VFR: {got}"
+
+
+def times_as_an_array_are_read_by_their_length():
+    """An R2 review's finding: measure.sheet given its times as a NumPy array tested the array's truth, not its length,
+    so one time at 0.0 drew nothing and two raised ValueError."""
+    import numpy as np
+    sys.path.insert(0, str(TOOLS))
+    sys.path.insert(0, str(Path(__file__).parent))
+    import awkward
+    import measure
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        film = awkward.numbered(d)
+        for k, times in enumerate((np.array([]), np.array([0.0]), np.array([0.0, 1.0]))):
+            (d / f"s{k}").mkdir()
+            files = measure.sheet(film, times, d / f"s{k}", 30.0)
+            assert len(files) == (0 if len(times) == 0 else 1), (times, files)
+        got = [None if im is None else awkward.number(im) for im in measure.grabs(film, np.array([0.0, 1.0, 2.0]))]
+        assert got == [0, 30, 60], got
+
+
+def a_batch_that_starts_in_preroll_picks_each_frame_as_one_grab_would():
+    """An R2 review's finding: on a file with packets before 0, a batch whose first time fell in the preroll a decode
+    never shows counted every later pick from the wrong picture ([3, 6, 34] where single grabs give [3, 3, 31]). Each
+    pick is checked against the shown picture nearest its time in a plain decode from the start."""
+    sys.path.insert(0, str(TOOLS))
+    sys.path.insert(0, str(Path(__file__).parent))
+    import awkward
+    import measure
+    with tempfile.TemporaryDirectory() as tmp:
+        pre = awkward.preroll(Path(tmp))
+        seen = awkward.shown_at(pre)
+        at = [-0.1, 0.0, 0.933333, 2.0, 4.8]
+        want = [min(seen, key=lambda s: (abs(s[0] - t), s[0]))[1] for t in at]
+        got = [None if im is None else awkward.number(im) for im in measure.grabs(pre, at)]
+        assert want[:3] == [3, 3, 31] and got == want, f"preroll batch picks {got}, not {want}"
+        got = [awkward.number(measure.grab(pre, t)) for t in at]
+        assert got == want, f"preroll single grabs {got}, not {want}"
+
+
+def a_files_frames_and_keyframes_come_from_one_read_of_its_packets():
+    """C5a: frame_times read the packets and then the whole file again for its start_time, and keyframe_times did both
+    once more; one ffprobe now gives the times, the keyframes and the start_time, on a file whose clock starts late."""
+    from unittest.mock import patch
+    import numpy as np
+    sys.path.insert(0, str(TOOLS))
+    sys.path.insert(0, str(Path(__file__).parent))
+    import awkward
+    import film_diff
+    with tempfile.TemporaryDirectory() as tmp:
+        late = awkward.vfr_late(Path(tmp))
+        real, calls = film_diff.subprocess.run, []
+        with patch.object(film_diff.subprocess, "run", lambda cmd, **k: (calls.append(cmd[0]), real(cmd, **k))[1]):
+            times = film_diff.frame_times(late)
+            assert calls == ["ffprobe"], f"frame_times reads the file once: {calls}"
+            calls.clear()
+            times2, keys = film_diff.packet_times(late)
+            assert calls == ["ffprobe"], f"times and keyframes in one read: {calls}"
+        assert np.array_equal(times, times2) and abs(times[0]) < 1e-9 and abs(times[30] - 1.0) < 1e-3, times[:3]
+        assert keys and keys[0] == 0.0 and all(k in set(times.tolist()) for k in keys), keys
+
+
+def the_light_table_and_the_ink_mask_are_the_old_numbers():
+    """C4: lit_middle reads light from a table, and look finds ink with cv2.inRange; both must give the old numbers
+    exactly, the table on all 256 greys and the mask where the ground's mean is a half and pixels sit at 40 from it."""
+    import numpy as np
+    sys.path.insert(0, str(TOOLS))
+    import measure
+    greys = np.resize(np.arange(256, dtype=np.uint8), (180, 320))
+    assert np.array_equal(measure.GAMMA22[greys], (greys.astype(np.float32) / 255) ** 2.2), "the light table is the power, bit for bit"
+    rng = np.random.default_rng(4)
+    for ground in ((100, 101), (40, 41), (200, 201), (0, 0), (255, 255), (7, 9)):
+        rgb = rng.integers(0, 256, (90, 160, 3)).astype(np.uint8)
+        border = np.array(ground * 500, np.uint8)[:2 * 160 + 2 * 90]
+        rgb[0], rgb[-1], rgb[:, 0], rgb[:, -1] = (np.stack([border[:160]] * 3, -1), np.stack([border[160:320]] * 3, -1),
+                                                  np.stack([border[320:410]] * 3, -1), np.stack([border[410:500]] * 3, -1))
+        bg = measure.background(rgb)
+        near = np.clip(np.round(bg)[None, None, :] + rng.integers(-42, 43, (90, 160, 3)), 0, 255).astype(np.uint8)
+        near[0], near[-1], near[:, 0], near[:, -1] = rgb[0], rgb[-1], rgb[:, 0], rgb[:, -1]
+        for picture in (rgb, near):
+            old = np.abs(picture.astype(int) - measure.background(picture)).max(axis=2) > 40
+            assert abs(old.mean() - measure.look(picture)["occupancy"]) < 5e-4, ground
+            b = measure.background(picture)
+            lo, hi = np.clip(np.ceil(b - 40), 0, 255), np.clip(np.floor(b + 40), 0, 255)
+            new = measure.cv2.inRange(picture, tuple(float(v) for v in lo), tuple(float(v) for v in hi)) == 0
+            assert np.array_equal(old, new), (ground, b)
+
+
 if __name__ == "__main__":
+    the_light_table_and_the_ink_mask_are_the_old_numbers()
+    a_files_frames_and_keyframes_come_from_one_read_of_its_packets()
+    a_batch_that_starts_in_preroll_picks_each_frame_as_one_grab_would()
+    times_as_an_array_are_read_by_their_length()
     a_short_window_or_broken_sound_is_not_measured()
     a_cut_short_file_is_not_measured()
+    batched_seeks_stay_exact_and_under_select_limit()
     beat_rows()
     keyframes_are_not_events()
     one_to_one()

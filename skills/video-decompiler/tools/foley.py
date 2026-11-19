@@ -15,7 +15,6 @@ import json
 import math
 import re
 import sys
-import wave
 from pathlib import Path
 
 import numpy as np
@@ -30,10 +29,15 @@ def band(x, lo, hi, sr=SR):
     """Zero-phase 4th-order Butterworth-like FFT bandpass."""
     if len(x) == 0:
         return x
+    return bands(x, [(lo, hi)], sr)[0]
+
+
+def bands(x, edges, sr=SR):
+    """band() for each (lo, hi) in edges, from one forward FFT of x."""
     X = np.fft.rfft(x)
     f = np.fft.rfftfreq(len(x), 1.0 / sr)
-    H = 1.0 / np.sqrt(1.0 + (lo / np.maximum(f, 1.0)) ** 8) / np.sqrt(1.0 + (f / max(hi, lo + 10.0)) ** 8)
-    return np.fft.irfft(X * H, len(x)).astype(np.float32)
+    return [np.fft.irfft(X * (1.0 / np.sqrt(1.0 + (lo / np.maximum(f, 1.0)) ** 8) / np.sqrt(1.0 + (f / max(hi, lo + 10.0)) ** 8)), len(x)).astype(np.float32)
+            for lo, hi in edges]
 
 
 def pan_gains(pan):
@@ -114,8 +118,7 @@ def whoosh_from_camera(camera_samples, duration_s, seed=7):
     env = np.interp(t_audio, ts, norm).astype(np.float32)
     pan_curve = np.interp(t_audio, ts, pans).astype(np.float32)
     noise = rng.standard_normal(total).astype(np.float32)
-    low_band = band(noise, 240.0, 1400.0)
-    high_band = band(noise, 1400.0, 5600.0)
+    low_band, high_band = bands(noise, [(240.0, 1400.0), (1400.0, 5600.0)])
     # Faster angular velocity shifts energy from warm low air to bright high air
     air = (low_band * (1.0 - 0.55 * np.clip(env, 0.0, 1.0)) + high_band * (0.35 + 0.65 * np.clip(env, 0.0, 1.0))) * (env ** 1.4) * 0.32
     angles = (pan_curve + 1.0) * (np.pi / 4.0)
@@ -240,10 +243,11 @@ def extract_telemetry_from_film(d: Path):
             z = z + (tz - z) * k
         return cx, cy, z
 
+    # the pose at each half-frame edge, once: frame f moves from edges[f] to edges[f + 1] (each inner edge was computed twice)
+    edges = [cam_at(0)] + [cam_at(f + 0.5) for f in range(total_frames - 1)] + [cam_at(total_frames - 1)] if total_frames > 0 else []
     camera_samples = []
     for f in range(total_frames):
-        x0, y0, z0 = cam_at(max(0, f - 0.5))
-        x1, y1, z1 = cam_at(min(total_frames - 1, f + 0.5))
+        (x0, y0, z0), (x1, y1, z1) = edges[f], edges[f + 1]
         vx = (x1 - x0) * fps
         vy = (y1 - y0) * fps
         z_rate = math.log(max(1e-4, z1) / max(1e-4, z0)) * fps
@@ -324,13 +328,10 @@ def extract_telemetry_from_film(d: Path):
 
 
 def write_wav(path: Path, mix: np.ndarray):
+    import lean
+    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    y = (np.clip(mix, -1.0, 1.0) * 32767.0).astype("<i2")
-    with wave.open(str(path), "wb") as w:
-        w.setnchannels(2)
-        w.setsampwidth(2)
-        w.setframerate(SR)
-        w.writeframes(y.tobytes())
+    lean.write_wav(path, mix)
 
 
 def blend_into_sound_wav(sound_wav: Path, foley_mix: np.ndarray, foley_gain_db: float = -9.5):
@@ -344,14 +345,17 @@ def blend_into_sound_wav(sound_wav: Path, foley_mix: np.ndarray, foley_gain_db: 
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg or not sound_wav.is_file():
         return None
-    no_win = 0x08000000 if os.name == "nt" else 0
-    p = subprocess.run(
-        [ffmpeg, "-v", "error", "-nostdin", "-i", str(sound_wav), "-ac", "2", "-ar", str(SR), "-f", "f32le", "-"],
-        capture_output=True, creationflags=no_win,
-    )
-    if p.returncode != 0 or not p.stdout:
-        return None
-    base = np.frombuffer(p.stdout, dtype="<f4").reshape(-1, 2).copy()
+    # the mix VD wrote is a 16-bit stereo WAV, read directly (the same samples ffmpeg gives); anything else through ffmpeg
+    base = lean._wav_samples(sound_wav, 0.0)
+    if base is None or not len(base):
+        no_win = 0x08000000 if os.name == "nt" else 0
+        p = subprocess.run(
+            [ffmpeg, "-v", "error", "-nostdin", "-i", str(sound_wav), "-ac", "2", "-ar", str(SR), "-f", "f32le", "-"],
+            capture_output=True, creationflags=no_win,
+        )
+        if p.returncode != 0 or not p.stdout:
+            return None
+        base = np.frombuffer(p.stdout, dtype="<f4").reshape(-1, 2).copy()
     n = min(len(base), len(foley_mix))
     gain = 10.0 ** (foley_gain_db / 20.0)
     base[:n] += foley_mix[:n] * gain
@@ -361,6 +365,7 @@ def blend_into_sound_wav(sound_wav: Path, foley_mix: np.ndarray, foley_gain_db: 
         base *= 0.77 / pk
     tmp_wav = sound_wav.with_name(sound_wav.stem + ".foley-tmp.wav")
     write_wav(tmp_wav, base)
+    measured = None
     try:
         lufs, tp = lean.loudness(tmp_wav)
         if lufs is not None:
@@ -370,10 +375,12 @@ def blend_into_sound_wav(sound_wav: Path, foley_mix: np.ndarray, foley_gain_db: 
             if abs(delta_db) > 0.15:
                 base = np.clip(base * (10.0 ** (delta_db / 20.0)), -0.88, 0.88)
                 write_wav(tmp_wav, base)
+            else:
+                measured = (lufs, tp)   # the file moved into place is the one just metered
         tmp_wav.replace(sound_wav)
     finally:
         tmp_wav.unlink(missing_ok=True)
-    return lean.loudness(sound_wav)     # what was written, measured: the note said -15 LUFS of a file at -24.7
+    return measured or lean.loudness(sound_wav)     # what was written, measured: the note said -15 LUFS of a file at -24.7
 
 
 def run_foley(film_dir: Path, out_wav: Path = None, out_json: Path = None, mix_into_sound: bool = False):

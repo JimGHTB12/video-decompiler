@@ -6,13 +6,12 @@
 """
 import argparse
 import json
+import random
 import re
 import secrets
 import shutil
 import sys
 from pathlib import Path
-
-import numpy as np
 
 TOOLS = Path(__file__).resolve().parent
 sys.path.insert(0, str(TOOLS))
@@ -248,6 +247,7 @@ def evaluate_sheet_perceptual(sheet_jpg: Path):
     brightest tones (1st and 99th percentile luminance). That ratio is the sheet's tonal range, not text against its
     ground: a sheet can span 21:1 with pale text on white, so nothing here says the sheet's words can be read."""
     import look
+    import numpy as np
     from PIL import Image
     rgb = np.asarray(Image.open(sheet_jpg).convert("RGB"))
     weber, crowding, L = look.weber_contrast_map(rgb)
@@ -263,6 +263,7 @@ def evaluate_sheet_perceptual(sheet_jpg: Path):
 def measure_divergence(made_cands):
     """Verify genuine multi-concept divergence across the 4 candidates: pairwise lexical Jaccard distance of `BOARD.md`,
     luminance histogram L1 distance across the 4 world sheets, and clock tempo spread."""
+    import numpy as np
     from PIL import Image
     token_sets = []
     hists = []
@@ -294,7 +295,6 @@ def build_tournament(name: str, brief: str = None, repo_dir: Path = None, agains
     dealt letters A..D in a neutral reads folder, and write the tournament key and two cross-family reader briefs."""
     import lean
     import pack
-    import borrow
     root = Path(name).resolve()
     out_root = lean.outdir(root)
     n_tourn = 1
@@ -333,7 +333,7 @@ def build_tournament(name: str, brief: str = None, repo_dir: Path = None, agains
     # the four sketches are always made in the same order, so a deal seeded by the tournament's number (as pack.deal is,
     # for line-ups of films) would be the same on every machine and readable from this code: the letters are drawn at
     # random instead, and the key file records them. `seed` fixes them for a test.
-    dealt = pack.deal(seed, 4) if seed is not None else secrets.SystemRandom().sample(list(pack.LETTERS[:4]), 4)
+    dealt = random.Random(seed).sample(list(pack.LETTERS[:4]), 4) if seed is not None else secrets.SystemRandom().sample(list(pack.LETTERS[:4]), 4)
     reads_base = Path(reads_root or pack.READS)
     pack_dir = reads_base / secrets.token_hex(6)
     while pack_dir.exists():
@@ -350,8 +350,8 @@ def build_tournament(name: str, brief: str = None, repo_dir: Path = None, agains
         for l in board_text.splitlines():
             if l.startswith("# Board:") or l.startswith("- **Starter grammar:**"):
                 continue
-            # Redact archetype and folder names so blind readers judge pure visual/narrative form
-            clean_l = re.sub(r"\b(plusone|stet|onoma|linden|" + re.escape(root.name) + r")\b", "CANDIDATE", l, flags=re.I)
+            # Redact archetype and folder names so blind readers judge pure visual/narrative form (lookarounds, not \b, so names like plus+ match)
+            clean_l = re.sub(r"(?<!\w)(plusone|stet|onoma|linden|" + re.escape(root.name) + r")(?!\w)", "CANDIDATE", l, flags=re.I)
             redacted_lines.append(clean_l)
         (slot / "BOARD-BLIND.md").write_text(f"# Candidate {letter}\n\n" + "\n".join(redacted_lines) + "\n", encoding="utf-8")
         mapping[letter] = {
@@ -512,6 +512,7 @@ def main(argv=None):
     ap.add_argument("--readings", metavar="FILE", help="parse blind VLM reader rankings from READINGS.md and promote the winner")
     ap.add_argument("--render", action="store_true", help="render the 3-moment world sheets with raea")
     ap.add_argument("--reads", help="neutral root for blind tournament packs")
+    ap.add_argument("--seed", type=int, default=None, help="deterministic deal seed for tests")
     a = ap.parse_args(argv)
     root = Path(a.name).resolve()
     if a.select or a.readings:
@@ -524,15 +525,18 @@ def main(argv=None):
         print(f"promoted winner ({arch}, from {cdir}) -> {root}")
         print(root)
         return
-    tourn_dir, key_path, brief_path, _ = build_tournament(
+    if a.against:
+        raise SystemExit("evolve.py --against goes with --select (or --readings): it fits the chosen sketch to a reference film")
+    tourn_dir, key_path, brief_path, mapping = build_tournament(
         str(root),
         brief=a.brief,
         repo_dir=Path(a.repo) if a.repo else None,
-        against=Path(a.against) if a.against else None,
         render=a.render,
         reads_root=Path(a.reads) if a.reads else None,
+        seed=a.seed,
     )
-    print(f"spawned 4 orthogonal WORLD.md candidates in {root / 'candidates'}")
+    cands_root = Path(next(iter(mapping.values()))["dir"]).parent
+    print(f"spawned 4 orthogonal WORLD.md candidates in {cands_root}")
     print(f"the blind tournament pack, to give readers: {tourn_dir}")
     print(f"the jury brief: {brief_path}")
     print(f"the key, never given to readers: {key_path}")

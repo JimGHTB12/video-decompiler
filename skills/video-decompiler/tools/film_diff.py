@@ -10,6 +10,7 @@ the target is reported as short, one that runs more than one frame past it as lo
 Other tools import the shared pieces from here: the SSIM, the ffprobe reader and the frame-exact seek.
 """
 import argparse
+import functools
 import json
 import os
 import re
@@ -46,13 +47,27 @@ def shown_size(stream):
     return (h, w) if round(float(turn)) % 180 == 90 else (w, h)
 
 
+_PROBED = {}
+
+
 def ffprobe(path):
     """The first video stream's fields as ffprobe gives them, uninterpreted, so each tool keeps choosing its own rate.
     The size is the one shown, after any rotation, which is the size ffmpeg decodes it at. A path that isn't there, and a
-    picture with a video's name, are refused in words, not with a KeyError."""
+    picture with a video's name, are refused in words, not with a KeyError. Asked of ffprobe once a process for the file
+    as it stands (its path, size and modified time): one vd pack asked it eight to ten times a film. A copy each time."""
     if not Path(path).exists():
         raise SystemExit(f"no such file: {path}")
-    done = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,width,height,avg_frame_rate,r_frame_rate:stream_side_data=rotation:stream_tags=rotate",
+    st = os.stat(path)
+    key = (os.path.abspath(str(path)), st.st_mtime_ns, st.st_size)
+    if key not in _PROBED:
+        if len(_PROBED) > 64:
+            _PROBED.clear()
+        _PROBED[key] = _ffprobe(path)
+    return dict(_PROBED[key])
+
+
+def _ffprobe(path):
+    done = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,width,height,avg_frame_rate,r_frame_rate,color_space:stream_side_data=rotation:stream_tags=rotate",
                            "-show_entries", "format=duration,start_time,format_name", "-of", "json", str(path)], capture_output=True, text=True, creationflags=NO_WINDOW)
     info = json.loads(done.stdout or "{}")
     streams = info.get("streams", [])
@@ -63,12 +78,57 @@ def ffprobe(path):
     if re.search(r"_pipe|image2", fmt.get("format_name", "")):  # what the file is (png_pipe, jpeg_pipe, image2), not its name
         raise SystemExit(f"{path} is a still image, not a video")
     start = float(fmt.get("start_time") or 0.0)
-    duration = float(fmt["duration"]) if "duration" in fmt else last_packet_end(path, start, rate(video.get("avg_frame_rate", "0/0")) or rate(video.get("r_frame_rate", "0/0")))
+    fps = rate(video.get("avg_frame_rate", "0/0")) or rate(video.get("r_frame_rate", "0/0"))
+    duration = float(fmt["duration"]) if "duration" in fmt else last_packet_end(path, start, fps)
+    if "duration" in fmt and start > 0:
+        # a header's duration is a length in most containers and an end time in some: a 5 s picture offset to 3600 s
+        # read 3605 s, and every rate per ten seconds was divided by it (a review's finding). Where the file starts after
+        # 0 the header is read the way that agrees with where the file's last packet, of any stream, ends: at the
+        # header's value (an end time) or at start_time plus it (a length). A file whose packets can't be read keeps it
+        # Only when that packet does end at the header's value: the last packet left in a cut-off file ends far before
+        # either, and taking the start off its header then gave a 5 s picture -1 s and let half a film through as the
+        # whole of one (a review's finding)
+        # Never in MP4, MOV or FLV, whose header is a length stored when the file was finished: one of those cut off on
+        # a packet's edge, where the film had run as long as that length says, read as an end time too (the re-check's
+        # finding: half of a 10 s MP4 starting at 5 s, cut there, passed for a whole 5 s film). Matroska, WebM and
+        # ASF headers are end times, and any other container is asked the same way (a first fix asked only Matroska
+        # and left a Windows Media file an hour long: the confirmation's finding). An FLV written to a pipe has no
+        # stored length and ffprobe gives its end time: that one stays as long as its header says, as in 0.2.2
+        stored_length = any(kind in fmt.get("format_name", "") for kind in ("mp4", "flv"))
+        end = None if stored_length else last_end(path)
+        near = max(0.25, 2 / fps if fps else 0.25)
+        if end is not None and duration > start and abs(duration - end) <= near and abs(duration - end) < abs(duration + start - end):
+            duration -= start
     if duration is None:
         raise SystemExit(f"{path}: ffprobe finds neither a length nor a frame rate in it, so it can't be read as a video")
     w, h = shown_size(video)
     return {"w": w, "h": h, "avg_frame_rate": video.get("avg_frame_rate", "0/0"), "r_frame_rate": video.get("r_frame_rate", "0/0"),
-            "duration": duration, "start_time": start, "audio": any(s.get("codec_type") == "audio" for s in streams)}
+            "duration": duration, "start_time": start, "audio": any(s.get("codec_type") == "audio" for s in streams),
+            "color_space": video.get("color_space")}
+
+
+def last_end(path):
+    """Where the file's last packet of any stream ends, on its own timestamps (not from start_time); None when no packet
+    carries a time or the packets can't be read. Read once a process for the file as it is (ffprobe() is asked often)."""
+    st = os.stat(path)
+    return _last_end(str(path), st.st_mtime_ns, st.st_size)
+
+
+@functools.lru_cache(maxsize=32)
+def _last_end(path, _mtime, _size):
+    done = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "packet=pts_time,duration_time", "-of", "csv=p=0", path],
+                          capture_output=True, text=True, creationflags=NO_WINDOW)
+    if done.returncode or done.stderr.strip():   # a read that reported an error did not reach the file's end
+        return None
+    end = None
+    for line in done.stdout.split():
+        t, _, d = line.strip(",").partition(",")
+        try:
+            e = float(t) + (float(d) if d not in ("", "N/A") else 0.0)
+        except ValueError:  # a packet with no time
+            continue
+        end = e if end is None else max(end, e)
+    return end
 
 
 def last_packet_end(path, start=0.0, fps=0.0):
@@ -145,17 +205,45 @@ def stop_decoder(p, patience=5.0):
         p.wait()
 
 
-def frame_times(path):
-    """Every frame's time in seconds from the file's start, in display order, read from the packets without decoding.
-    Times count from the file's start_time, as ffmpeg's -ss does, so they line up with every seek here."""
-    done = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time", "-of", "csv=p=0", str(path)], capture_output=True, text=True, creationflags=NO_WINDOW)
-    try:
-        pts = sorted(float(x.strip(",")) for x in done.stdout.split() if x.strip(","))
-    except ValueError:  # a packet without a time: there is no honest per-frame clock to give
-        return None
+def packet_times(path, start_time=None):
+    """(times, keys) from one read of the packets, nothing decoded: every frame's time and every keyframe's, in seconds
+    from the file's start_time (as ffmpeg's -ss counts, so they line up with every seek here), in display order. times
+    is None when a packet has no time (there is no honest per-frame clock to give) or there are none; keys leaves such
+    packets out. The packets and the file's start_time come in one ffprobe: two were run for times and two for keys."""
+    done = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time,flags:format=start_time,format_name",
+                           "-of", "compact", str(path)], capture_output=True, text=True, creationflags=NO_WINDOW)
+    pts, keys, untimed, fmt = [], [], False, {}
+    for line in done.stdout.splitlines():
+        kind, _, rest = line.partition("|")
+        fields = dict(f.partition("=")[::2] for f in rest.split("|"))
+        if kind == "format":
+            fmt = fields
+            continue
+        if kind != "packet":
+            continue
+        try:
+            t = float(fields.get("pts_time", ""))
+        except ValueError:  # a packet without a time
+            untimed = True
+            continue
+        pts.append(t)
+        if "K" in fields.get("flags", ""):
+            keys.append(t)
     if not pts:
-        return None
-    return np.array(pts) - ffprobe(path)["start_time"]
+        return None, []
+    if re.search(r"_pipe|image2", fmt.get("format_name", "")):  # as ffprobe() says it: what the file is, not its name
+        raise SystemExit(f"{path} is a still image, not a video")
+    try:
+        st = float(fmt.get("start_time") or 0.0) if start_time is None else float(start_time)
+    except ValueError:  # "N/A"
+        st = 0.0
+    return (None if untimed else np.array(sorted(pts)) - st), sorted(t - st for t in keys)
+
+
+def frame_times(path, start_time=None):
+    """Every frame's time in seconds from the file's start, in display order, read from the packets without decoding
+    (packet_times)."""
+    return packet_times(path, start_time)[0]
 
 
 def variable_rate(times):
@@ -167,13 +255,9 @@ def variable_rate(times):
     return bool(np.any(np.abs(gaps - middle) > max(0.002, 0.1 * middle)))
 
 
-def refuse_variable(path, times):
-    """Tools that turn frame numbers into times need a constant rate: say so, and how to get one."""
-    if variable_rate(times):
-        gaps = np.diff(times)
-        fastest = round(1 / max(float(gaps[gaps > 0].min()), 1e-6))
-        raise SystemExit(f"{path} has a variable frame rate (frames {gaps.min() * 1000:.0f} to {gaps.max() * 1000:.0f} ms apart), so its frame numbers don't turn into times. "
-                         f"Make it constant first: ffmpeg -i \"{path}\" -fps_mode cfr -r {fastest} constant.mp4")
+def seek_frame(times, f):
+    """The -ss seconds that land on frame f: half way back to the frame before, so rounding never steps past frame f."""
+    return 0.0 if f <= 0 else float(times[f - 1] + times[f]) / 2
 
 
 def seek_to(times, t):
@@ -182,33 +266,59 @@ def seek_to(times, t):
     frame itself, so a plain seek returned the next frame one time in three. Half way back to the frame before can't."""
     k = int(np.clip(np.searchsorted(times, t), 1, len(times) - 1)) if len(times) > 1 else 0
     f = k - 1 if k and abs(times[k - 1] - t) <= abs(times[k] - t) else k
-    return (0.0 if f == 0 else float(times[f - 1] + times[f]) / 2), f
+    return seek_frame(times, f), f
+
+
+_UNREAD = object()
+
+
+def packet_clock(path, fps=None, times=_UNREAD):
+    """(frame times, seekable): the file's own packet times (`times`, when the caller already read them with
+    packet_times), or a regular clock at its rate when the packets carry none.
+    Seekable only when the times are the file's own: a raw H.264 stream decodes but has no packet times and no seek
+    index, so a seek to frame N of an estimated clock handed over nothing (an R2 review's finding). Where it is False,
+    a tool picks its frames by number from a decode from the start."""
+    times = frame_times(path) if times is _UNREAD else times
+    if times is None:
+        raw = ffprobe(path)
+        fps = fps or fps_of(raw)
+        return np.arange(int(raw["duration"] * fps) + 2) / fps, False
+    # packets before 0 are preroll a decode from the start never shows: packet i is then not the i-th picture, and a
+    # window asked for by picture number came back that many pictures early (an R2 review's finding)
+    return times, bool(times[0] >= 0)
+
+
+def shown_index(times, f):
+    """The number, in a decode from the start, of the picture packet f shows: f less the preroll packets before 0, which
+    are never shown (a preroll packet's own is the first picture shown)."""
+    return max(0, int(f) - int(np.count_nonzero(np.asarray(times) < 0)))
 
 
 def clock(path, fps=None):
     """A file's frame times, or a regular clock at its rate when the packets carry no times."""
-    times = frame_times(path)
-    if times is None:
-        raw = ffprobe(path)
-        fps = fps or fps_of(raw)
-        times = np.arange(int(raw["duration"] * fps) + 2) / fps
-    return times
+    return packet_clock(path, fps)[0]
 
 
-def probe(path):
-    raw = ffprobe(path)
+def probe(path, raw=None):
+    raw = ffprobe(path) if raw is None else raw
     return {"w": raw["w"], "h": raw["h"], "fps": fps_of(raw), "duration": raw["duration"]}
 
 
-def stream(path, start, seconds, fps, times=None):
-    """Frames from the frame nearest `start`, at `fps`, as float64 Y planes."""
+def _scored_input(path, start, seconds, fps, times=None):
+    """The decode stream() scores, up to its filters: one seek and one length, so the stills of the worst moments
+    (scored_stills) come from exactly the frames that were scored."""
     command = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
     if start:
         command += ["-ss", f"{seek_to(clock(path, fps) if times is None else times, start)[0]:.6f}"]
     command += ["-i", str(path)]
     if seconds:
         command += ["-t", f"{seconds:.4f}"]
-    command += ["-vf", f"fps={fps},scale={W}:{H}", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-"]
+    return command
+
+
+def stream(path, start, seconds, fps, times=None, raw_u8=False):
+    """Frames from the frame nearest `start`, at `fps`, as float64 Y planes (uint8, as decoded, with raw_u8)."""
+    command = _scored_input(path, start, seconds, fps, times) + ["-vf", f"fps={fps},scale={W}:{H}", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-"]
     p = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=NO_WINDOW)
     size = W * H * 3 // 2
     try:
@@ -216,7 +326,8 @@ def stream(path, start, seconds, fps, times=None):
             raw = p.stdout.read(size)
             if len(raw) < size:
                 break
-            yield np.frombuffer(raw[:W * H], dtype=np.uint8).reshape(H, W).astype(np.float64)
+            y = np.frombuffer(raw[:W * H], dtype=np.uint8).reshape(H, W)
+            yield y if raw_u8 else y.astype(np.float64)
     finally:  # a caller that stops early (next(), break) closes the generator: end ffmpeg, or it keeps the file open.
         # The pipe is closed first and ffmpeg waited for: killed at once, a launcher (Chocolatey's ffmpeg on the hosted
         # Windows runners) died and left the real ffmpeg holding the film (a council's finding)
@@ -225,8 +336,12 @@ def stream(path, start, seconds, fps, times=None):
 
 
 def blur8(x):
-    pad = np.pad(x, ((1, 0), (1, 0))).cumsum(0).cumsum(1)
-    return (pad[8:, 8:] - pad[:-8, 8:] - pad[8:, :-8] + pad[:-8, :-8]) / 64.0
+    """The mean of every 8x8 box that fits (x.shape less 7 each way). OpenCV's running box sum in float64, the same
+    numbers as summed-area differences: every sum here is of whole numbers far under 2**53, so each is exact either way,
+    and / 64 is exact too. Imported here, so a tool that only probes files never loads OpenCV."""
+    import cv2
+    return cv2.boxFilter(np.asarray(x, np.float64), cv2.CV_64F, (8, 8), anchor=(0, 0), normalize=True,
+                         borderType=cv2.BORDER_CONSTANT)[:-7, :-7]
 
 
 def ssim_map(a, b):
@@ -246,15 +361,22 @@ def ssim(a, b):
 
 def cells(x):
     h, w = H // ROWS, W // COLS
-    return x[:h * ROWS, :w * COLS].reshape(ROWS, h, COLS, w).mean(axis=(1, 3))
+    part = x[:h * ROWS, :w * COLS].reshape(ROWS, h, COLS, w)
+    if x.dtype == np.uint8:   # summed as whole numbers then divided once: the value mean gives on the same numbers in float64
+        return part.sum(axis=(1, 3), dtype=np.uint32) / float(h * w)
+    return part.mean(axis=(1, 3))
 
 
 def read_pair(original, rebuild, start, seconds, fps, times=None):
     scores, maes, la, lb, ea, eb, errors = [], [], [], [], [], [], []
     prev_a = prev_b = None
     missing = 0
-    b_iter = stream(rebuild, 0, None, fps)  # all of it, so frames past the target's end are counted, not cut off
-    a_iter = stream(original, start, seconds, fps, times)
+    import cv2
+    # read as decoded (uint8): differences and box sums of whole numbers come out the same as in float64, without a
+    # float64 copy of every frame
+    b_iter = stream(rebuild, 0, None, fps, raw_u8=True)  # all of it, so frames past the target's end are counted, not cut off
+    a_iter = stream(original, start, seconds, fps, times, raw_u8=True)
+    n = float(W * H)
     for a in a_iter:
         b = next(b_iter, None)
         if b is None:
@@ -262,12 +384,13 @@ def read_pair(original, rebuild, start, seconds, fps, times=None):
             missing = 1 + sum(1 for _ in a_iter)
             break
         scores.append(ssim(a, b))
-        maes.append(float(np.abs(a - b).mean()))
+        diff = cv2.absdiff(a, b)
+        maes.append(int(diff.sum(dtype=np.int64)) / n)
         la.append(cells(a))
         lb.append(cells(b))
-        errors.append(cells(np.abs(a - b)))
-        ea.append(0.0 if prev_a is None else float(np.abs(a - prev_a).mean()))
-        eb.append(0.0 if prev_b is None else float(np.abs(b - prev_b).mean()))
+        errors.append(cells(diff))
+        ea.append(0.0 if prev_a is None else int(cv2.absdiff(a, prev_a).sum(dtype=np.int64)) / n)
+        eb.append(0.0 if prev_b is None else int(cv2.absdiff(b, prev_b).sum(dtype=np.int64)) / n)
         prev_a, prev_b = a, b
     extra = sum(1 for _ in b_iter)
     return {"ssim": np.array(scores), "mae": np.array(maes), "la": np.array(la), "lb": np.array(lb), "ea": np.array(ea), "eb": np.array(eb), "errors": np.array(errors), "frames_past_end": extra, "frames_missing": missing}
@@ -337,16 +460,37 @@ def worst_frames(scores, k=4, spacing=20):
     return picks
 
 
-def colour_matrix(path):
+def matrix_of(color_space):
     """raea's MP4s carry no colour tags though their data is BT.709, and ffmpeg reads an untagged file as BT.601."""
+    return "bt601" if (color_space or "").strip() in ("smpte170m", "bt470bg") else "bt709"
+
+
+def colour_matrix(path):
+    """The matrix to read PATH's pictures with (matrix_of), asked of ffprobe on its own."""
     done = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=color_space", "-of", "csv=p=0", str(path)], capture_output=True, text=True, creationflags=NO_WINDOW)
-    return "bt601" if done.stdout.strip() in ("smpte170m", "bt470bg") else "bt709"
+    return matrix_of(done.stdout)
 
 
 def full_frame(path, seconds, w=960, h=540, times=None):
     at = seek_to(clock(path) if times is None else times, seconds)[0]
     done = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", f"{at:.6f}", "-i", str(path), "-frames:v", "1", "-vf", f"scale={w}:{h}:in_color_matrix={colour_matrix(path)}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, creationflags=NO_WINDOW)
     return Image.fromarray(np.frombuffer(done.stdout, dtype=np.uint8).reshape(h, w, 3))
+
+
+def scored_stills(path, start, seconds, fps, picks, times=None, w=960, h=540, matrix=None):
+    """{k: full-size picture} of output frames `picks` of the very decode stream() scored: the same seek, length and fps
+    resampling, then picked by the resampler's own count. A pick turned back into a time and fetched by the nearest
+    packet showed the frame after the one scored on a 30-then-60 fps original (a review's finding)."""
+    picks = sorted(set(int(k) for k in picks))
+    if not picks:
+        return {}
+    pick = "+".join(f"eq(n\\,{k})" for k in picks)
+    done = subprocess.run(_scored_input(path, start, seconds, fps, times) + [
+        "-vf", f"fps={fps},select='{pick}',scale={w}:{h}:in_color_matrix={matrix or colour_matrix(path)}", "-fps_mode", "passthrough",
+        "-frames:v", str(len(picks)), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, creationflags=NO_WINDOW)
+    size = w * h * 3
+    return {k: Image.fromarray(np.frombuffer(done.stdout[i * size:(i + 1) * size], dtype=np.uint8).reshape(h, w, 3))
+            for i, k in enumerate(picks) if (i + 1) * size <= len(done.stdout)}
 
 
 def error_box(cell_errors):
@@ -398,11 +542,12 @@ def compare_ink(original, rebuild, box, source_width, source_height):
 def run(original, rebuild, start, end, out, spec=None, round_no=None):
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
-    info = probe(original)
+    raw_a, raw_b = ffprobe(original), ffprobe(rebuild)   # each file asked once: its size, rate, length and colour matrix
+    info = probe(original, raw_a)
     check_window(start, end, info["duration"], original)  # the window is the original's; the rebuild's length is checked against it below
     fps = info["fps"]
     seconds = (end - start) if end else info["duration"] - start
-    reb = probe(rebuild)
+    reb = probe(rebuild, raw_b)
     times_a, times_b = clock(original, fps), clock(rebuild, reb["fps"])
     data = read_pair(original, rebuild, start, seconds, fps, times_a)
     n = len(data["ssim"])
@@ -411,11 +556,14 @@ def run(original, rebuild, start, end, out, spec=None, round_no=None):
     lags, lag_summary = timing(data["la"], data["lb"], fps)
     picks = worst_frames(data["ssim"])
     moments = []
-    first = seek_to(times_a, start)[1] if start else 0  # the frame the comparison started on, so each still is the frame scored
+    # each still is the frame scored: taken from the same decodes read_pair scored, picked by the resampled count
+    stills_a = scored_stills(original, start, seconds, fps, picks, times_a, matrix=matrix_of(raw_a["color_space"]))
+    stills_b = scored_stills(rebuild, 0, None, fps, picks, times_b, matrix=matrix_of(raw_b["color_space"]))
     for t in picks:
         seconds_in = t / fps
-        a = full_frame(original, float(times_a[min(first + t, len(times_a) - 1)]), times=times_a)
-        b = full_frame(rebuild, seconds_in, times=times_b)
+        if t not in stills_a or t not in stills_b:   # a decoder that stopped short: no sheet rather than another frame's
+            continue
+        a, b = stills_a[t], stills_b[t]
         box = error_box(data["errors"][t])
         image, difference = sheet(a, b, box)
         name = f"worst-{t:05d}.jpg"

@@ -11,6 +11,7 @@ two answers turned out to depend on the encode. A real film is
 compressed, so a pass here says the tool reads clean pictures right on this machine, and no more than that.
 """
 import json
+import math
 import subprocess
 import sys
 import tempfile
@@ -429,6 +430,212 @@ def case_colour_change(tmp):
     text = (tmp / "colour" / "SEE.md").read_text(encoding="utf-8")
     equal("colour_change", "plain sentence for an unexplained change", "with no cut and nothing moving at that moment" in text, True)
     equal("colour_change", "compares with the rest of the film", "only sudden whole-picture colour change in this film" in text, True)
+
+
+def case_colour_at_the_hue_line(tmp):
+    # a review's finding: a whole-picture hue step of 6.000001 degrees, read through timecheck's float32 order, became
+    # 5.9999996, under the 6-degree line, and the colour event at 0.333 s left motion.json and SEE.md. The frames are
+    # the reviewer's: the second draw of seed 123 (bright noise, green raised by 1 to 3 levels where blue leads)
+    rng = np.random.default_rng(123)
+    for _ in range(2):
+        v = rng.integers(120, 256, (90, 160), dtype=np.uint8)
+        c = rng.integers(1, 4, (90, 160), dtype=np.uint8) * 10
+    before = np.stack([v - c, v - c, v], axis=2)
+    after = before.copy()
+    after[:, :, 1] += c // 10
+    film = tmp / "hue-line.mkv"
+    # FFV1 in BGR keeps every byte, which this case is about (x264's yuv420p would move the hue)
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", "160x90", "-r", "30", "-i", "-",
+                    "-c:v", "ffv1", "-pix_fmt", "bgr0", str(film)], input=before.tobytes() * 10 + after.tobytes() * 10, check=True, creationflags=see.NO_WINDOW)
+    model = read(film, tmp / "hue-line")
+    evs = [c for s in model["shots"] for c in s["colour"]]
+    equal("colour_hue_line", "the event at 0.333 s is there", [round(e["t"], 3) for e in evs], [0.333])
+    equal("colour_hue_line", "its rotation reads at or over 6 degrees", bool(evs) and evs[0]["rotation"] >= 6.0, True)
+
+
+def case_scatter_stats_are_the_old_numbers(tmp):
+    # B4: scatter_stats returns at once when no patch is of a size that can count, and sums only the changed pixels;
+    # both must give the old 7-tuple exactly, here on random masks from empty to dense, specks to blobs
+    def old(changed, d, tau, ru, rv, w, h):
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(changed.astype(np.uint8), connectivity=8)
+        if count <= 1:
+            return see.NO_SCATTER
+        areas = stats[1:, cv2.CC_STAT_AREA]
+        strength = np.bincount(labels.ravel(), d.ravel(), count)[1:] / np.maximum(areas, 1)
+        u = np.bincount(labels.ravel(), ru.ravel(), count)[1:] / np.maximum(areas, 1)
+        v = np.bincount(labels.ravel(), rv.ravel(), count)[1:] / np.maximum(areas, 1)
+        small = (areas >= 3) & (areas <= max(30, 0.0015 * w * h)) & ((strength >= 2.5 * tau) | ((strength >= 1.5 * tau) & (np.hypot(u, v) > 0.25)))
+        n = int(small.sum())
+        if n == 0:
+            return see.NO_SCATTER
+        if n > 400:
+            return (n, 0.0, 24, 0.0, 0.0, 0.0, 0)
+        xs = stats[1:, cv2.CC_STAT_LEFT][small] + stats[1:, cv2.CC_STAT_WIDTH][small] / 2
+        ys = stats[1:, cv2.CC_STAT_TOP][small] + stats[1:, cv2.CC_STAT_HEIGHT][small] / 2
+        grid = {(int(x * 6 // w), int(y * 4 // h)) for x, y in zip(xs, ys)}
+        u, v = u[small], v[small]
+        speed = np.hypot(u, v)
+        going = speed > 0.25
+        agree = float(np.hypot((u[going] / speed[going]).mean(), (v[going] / speed[going]).mean())) if going.sum() >= 4 else 0.0
+        return (n, float(np.median(np.sqrt(areas[small]))), len(grid), float(areas[small].sum() / max(areas.sum(), 1)), agree, float(going.mean()),
+                min(len({c for c, _ in grid}), len({r for _, r in grid})))
+    rng = np.random.default_rng(14)
+    w, h = 480, 270
+    same = 0
+    for density in (0.0, 0.0005, 0.003, 0.02, 0.2, 0.6):
+        for blob in (0, 1, 2):
+            changed = rng.random((h, w)) < density
+            if blob:
+                changed = cv2.dilate(changed.astype(np.uint8), np.ones((2 * blob + 1, 2 * blob + 1), np.uint8)) > 0
+            d = rng.uniform(0, 40, (h, w)).astype(np.float32)
+            ru, rv = rng.normal(0, 0.5, (h, w)).astype(np.float32), rng.normal(0, 0.5, (h, w)).astype(np.float32)
+            same += see.scatter_stats(changed, d, 6.0, ru, rv, w, h) == old(changed, d, 6.0, ru, rv, w, h)
+    equal("scatter_stats", "the old 7-tuple on 18 masks", same, 18)
+
+
+def case_joins_and_tracks_are_the_old_ones(tmp):
+    # B7: join_primitives skips pairs already joined and takes each box's extent by min and max; link_tracks skips a
+    # region with no overlap past the reach of both of its tests. Both give the old regions and tracks, here on integer
+    # boxes that touch edge to edge and sit exactly 6 and 1.2 sizes away, where the skip's cut-offs are
+    def old_join(prims, w, h):
+        n = len(prims)
+        parent = list(range(n))
+
+        def find(i):
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+        for i in range(n):
+            a = prims[i]
+            for j in range(i + 1, n):
+                b = prims[j]
+                s = max(math.hypot(a[5], a[6]), math.hypot(b[5], b[6]))
+                if math.hypot(a[5] - b[5], a[6] - b[6]) > max(0.7, 0.5 * s):
+                    continue
+                gx, gy = max(0, max(a[0], b[0]) - min(a[2], b[2])), max(0, max(a[1], b[1]) - min(a[3], b[3]))
+                if max(gx, gy) <= 14:
+                    parent[find(i)] = find(j)
+                    continue
+                if s < 0.15 or max(gx, gy) > 0.8 * max(w, h):
+                    continue
+                mean_x, mean_y = (a[5] + b[5]) / 2, (a[6] + b[6]) / 2
+                mean_len = math.hypot(mean_x, mean_y) + 1e-9
+                ux, uy = mean_x / mean_len, mean_y / mean_len
+                perp = lambda box: sorted(abs(-uy * x + ux * y) for x in (box[0], box[2]) for y in (box[1], box[3]))
+                pa, pb = perp(a), perp(b)
+                lap = min(pa[-1], pb[-1]) - max(pa[0], pb[0])
+                short = min(pa[-1] - pa[0], pb[-1] - pb[0])
+                ca, cb = ((a[0] + a[2]) / 2, (a[1] + a[3]) / 2), ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)
+                dist = math.hypot(ca[0] - cb[0], ca[1] - cb[1])
+                if short > 0 and lap >= 0.6 * short and dist > 0 and abs((ca[0] - cb[0]) * ux + (ca[1] - cb[1]) * uy) / dist > 0.7:
+                    parent[find(i)] = find(j)
+        groups = {}
+        for i in range(n):
+            groups.setdefault(find(i), []).append(prims[i])
+        return see._join_radial([see._union(g) for g in groups.values()], w, h)
+
+    def old_link(regs, t, first, last, kind=0):
+        max_idle = max(2, int(round(see.MAX_GAP / max(float(np.median(np.diff(t))), 1e-6))))
+        live, done = [], []
+        for i in range(first + 1, last):
+            items = [r for r in regs[i] if r.kind == kind]
+            scored = []
+            for ti, tr in enumerate(live):
+                r0 = tr["regs"][-1]
+                gap = i - tr["idx"][-1]
+                cx, cy = (r0.x0 + r0.x1) / 2 + r0.vx * gap, (r0.y0 + r0.y1) / 2 + r0.vy * gap
+                size = max(8.0, (r0.x1 - r0.x0 + r0.y1 - r0.y0) / 2)
+                for gi, r in enumerate(items):
+                    x, y = (r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2
+                    dist = math.hypot(x - cx, y - cy) / size
+                    ix = max(0, min(r0.x1 + r0.vx, r.x1) - max(r0.x0 + r0.vx, r.x0))
+                    iy = max(0, min(r0.y1 + r0.vy, r.y1) - max(r0.y0 + r0.vy, r.y0))
+                    union = (r0.x1 - r0.x0) * (r0.y1 - r0.y0) + (r.x1 - r.x0) * (r.y1 - r.y0) - ix * iy
+                    iou = ix * iy / max(union, 1)
+                    dv = math.hypot(r.vx - r0.vx, r.vy - r0.vy)
+                    size_change = abs(math.log(max(r.area, 1) / max(r0.area, 1)))
+                    if dist < 1.2 or iou > 0.15:
+                        if kind == 1 or dv <= max(3.0, 0.8 * math.hypot(r0.vx, r0.vy) + 1):
+                            scored.append((dist - iou + 0.3 * dv / max(1.0, math.hypot(r0.vx, r0.vy)) + 0.25 * size_change, ti, gi))
+                    elif kind == 0 and gap == 1 and dist < 6 and size_change < 0.4 and abs(r.b - r0.b) + abs(r.g - r0.g) + abs(r.r - r0.r) < 60:
+                        scored.append((3.0 + dist * 0.1 + 0.25 * size_change, ti, gi))
+            used_t, used_g = set(), set()
+            for _, ti, gi in sorted(scored):
+                if ti in used_t or gi in used_g:
+                    continue
+                used_t.add(ti); used_g.add(gi)
+                live[ti]["idx"].append(i); live[ti]["regs"].append(items[gi])
+            for gi, r in enumerate(items):
+                if gi not in used_g:
+                    live.append({"idx": [i], "regs": [r]})
+            still = []
+            for tr in live:
+                (done if i - tr["idx"][-1] > max_idle else still).append(tr)
+            live = still
+        done.extend(live)
+        return done
+
+    rng = np.random.default_rng(7)
+    w, h = 480, 270
+    joins = 0
+    for _ in range(40):
+        prims = []
+        for _ in range(int(rng.integers(0, 30))):
+            x, y = (int(v) for v in rng.integers(0, 400, 2))
+            bw, bh = (int(v) for v in rng.integers(1, 40, 2))
+            vx, vy = (float(v) for v in rng.choice([0.0, 0.1, 0.5, 1.0, -1.0, 2.5], 2))
+            prims.append([x, y, x + bw, y + bh, bw * bh, vx, vy, float(rng.random())])
+        prims += [[0, 0, 10, 10, 100, 1.0, 0.0, 1.0], [24, 0, 34, 10, 100, 1.0, 0.0, 1.0], [48, 0, 58, 10, 100, 1.0, 0.0, 1.0]]   # gaps of 14
+        joins += see.join_primitives([list(p) for p in prims], w, h) == old_join([list(p) for p in prims], w, h)
+    equal("joins_and_tracks", "join_primitives as before on 40 frames", joins, 40)
+    regs, t = [], np.arange(30) / 30.0
+    for i in range(30):
+        frame = []
+        for k in range(int(rng.integers(0, 6))):
+            x, y = (int(v) for v in rng.integers(0, 300, 2))
+            s = int(rng.integers(2, 12))
+            frame.append(see.Reg(x, y, x + s, y + s, s * s, float(rng.choice([0.0, 1.0, 3.0])), 0.0, 1.0, 100, 100, 100, int(k % 2), 0.0, 0, 0))
+        # one region that walks 48 px a frame (6 sizes on), one that edges along touching its last box, and one at 1.2
+        frame += [see.Reg(48 * i, 200, 48 * i + 4, 204, 16, 0.0, 0.0, 1.0, 90, 90, 90, 0, 0.0, 0, 0),
+                  see.Reg(4 * i, 250, 4 * i + 4, 254, 16, 0.0, 0.0, 1.0, 90, 90, 90, 1, 0.0, 0, 0),
+                  see.Reg(400, 10 + 9.6 * i, 404, 14 + 9.6 * i, 16, 0.0, 0.0, 1.0, 90, 90, 90, 1, 0.0, 0, 0),
+                  # 5.75 sizes on, kept by the one-frame same-size test alone; and a bar that overlaps its last box with
+                  # its centre 1.22 sizes away, kept by the overlap alone
+                  see.Reg(46 * i, 230, 46 * i + 4, 234, 16, 0.0, 0.0, 1.0, 80, 80, 80, 0, 0.0, 0, 0),
+                  see.Reg(62 * i, 240, 62 * i + 100, 242, 200, 0.0, 0.0, 1.0, 70, 70, 70, 1, 0.0, 0, 0)]
+        regs.append(frame)
+    for kind in (0, 1):
+        new, old = see.link_tracks(regs, t, 0, 30, kind), old_link(regs, t, 0, 30, kind)
+        equal("joins_and_tracks", f"link_tracks kind {kind} as before", [(tr["idx"], tr["regs"]) for tr in new] == [(tr["idx"], tr["regs"]) for tr in old], True)
+
+
+def case_regions_medians_are_numpys(tmp):
+    # B1: regions_in takes its threshold's median from 256 counts and each piece's velocity median by partition; both
+    # equal np.median on odd and even sizes, ties and a middle pair that straddles a value. And a row and a column
+    # for X and Y give the regions the full grids gave
+    rng = np.random.default_rng(3)
+    u8 = [np.zeros(10, np.uint8), np.zeros(11, np.uint8), np.array([0, 0, 1, 1], np.uint8), np.array([3, 200], np.uint8),
+          np.array([255], np.uint8)] + [rng.integers(0, int(top), int(size)).astype(np.uint8) for top in (2, 9, 256) for size in (6, 7, 129600, 129601)]
+    equal("regions_medians", "uint8 medians as np.median", [see._u8_median(a) for a in u8], [float(np.median(a.astype(np.float32))) for a in u8])
+    f32 = [np.array([1.0, 2.0], np.float32), np.array([0.1, 0.2, 0.3, 0.4], np.float32), np.array([5.0, 5.0, 5.0], np.float32)] + \
+          [rng.normal(0, s, int(n)).astype(np.float32) for s in (0.01, 3.0) for n in (6, 7, 40, 41, 999)] + \
+          [rng.choice(np.float32([0.25, -0.75, 1.5]), 8) for _ in range(5)]
+    equal("regions_medians", "float32 medians as np.median", [see._median(a) for a in f32], [float(np.median(a)) for a in f32])
+    h, w = 90, 160
+    prev = np.zeros((h, w), np.uint8)
+    prev[30:50, 40:70] = 200
+    cur = np.roll(prev, 3, axis=1)
+    cur[60:70, 100:110] = 120                     # a patch that changes without moving
+    bgr = np.dstack([cur] * 3)
+    flow = np.zeros((h, w, 2), np.float32)
+    flow[30:50, 40:73, 0] = 3.0 + rng.normal(0, 0.05, (20, 33)).astype(np.float32)
+    M = np.array([[1.0, 0.002, 0.4], [-0.001, 1.0, -0.2]])
+    X, Y = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
+    ground = np.array([0, 0, 0])
+    grid = see.regions_in(prev, cur, bgr, flow, M, X, Y, ground, None)
+    lines = see.regions_in(prev, cur, bgr, flow, M, X[:1], Y[:, :1], ground, None)
+    equal("regions_medians", "a row and a column give the grid's regions", repr(lines) == repr(grid) and len(grid[0]) >= 2, True)
 
 
 def case_soft(tmp):
@@ -878,6 +1085,29 @@ def case_no_scatter_without_dust(tmp):
     grainy = dust_film(tmp, "grain_only", 185, 0, 1, noise_ground(186), grain=5.0)
     equal("no_scatter", "film grain only", read(grainy, tmp / "grain_only")["shots"][0].get("scattered"), None)
 
+
+def case_frames_phrase_60fps(tmp):
+    """Multi-frame colour change duration uses the film's frame step, not a hardcoded 1/30 s (Bb4)."""
+    equal("frames_phrase", "2-frame 60 fps step", see._frames_phrase({"t": 1.0, "t_end": 1.0 + 1 / 60}, step=1 / 60), "0.03 s")
+    equal("frames_phrase", "single frame", see._frames_phrase({"t": 1.0, "t_end": 1.0}, step=1 / 60), "one frame")
+    model = {
+        "film": {"name": "c60.mp4", "w": 1280, "h": 720, "fps": 60.0, "frames_read": 120},
+        "census": {"duration": 2.0, "moving_share": 0.0, "moves": 0, "moves_per_10s": 0.0, "big_moves": 0,
+                   "two_or_more_share": 0.0, "max_at_once": 0, "starts_overlapping": 0, "starts": 0,
+                   "still_seconds": 2.0, "frame_identical_seconds": 2.0},
+        "timecheck": {"ran": True, "findings": []},
+        "cadence": {"label": "steady"},
+        "flashes": [],
+        "repeats": [],
+        "shots": [{
+            "id": 1, "t0": 0.0, "t1": 2.0, "dur": 2.0, "join": {"kind": "start"},
+            "camera": {"state": "too short to read", "moves": [], "zooms": []},
+            "things": [], "relations": [], "changes": [], "stills": [], "cadence": [],
+            "colour": [{"t": 1.0, "t_end": 1.0 + 1 / 60, "dL": 20.0, "da": 0.0, "db": 0.0, "rotation": 0.0}],
+            "sharpness": [],
+        }],
+    }
+    equal("frames_phrase", "transcript 60 fps colour line", "in 0.03 s," in see.transcript(model, step=1 / 60), True)
 
 
 CASES = {k[5:]: v for k, v in list(globals().items()) if k.startswith("case_")}

@@ -19,6 +19,7 @@ import argparse
 import functools
 import json
 import math
+import os
 import re
 import subprocess
 import sys
@@ -36,6 +37,7 @@ FIT_MSE = 0.02    # above this the move is not a spring of this family (an inOut
 GROUND_STEP = 0.25   # seconds between the samples a film's grounds and accents are read from
 GROUND_HELD = 0.5    # seconds a full-frame colour must hold to be a ground: a shorter one is a flash or a card passing
 GROUND_COVER = 0.3   # share of the frame within 40 levels of the border's commonest colour for that colour to be the frame's ground
+COLOURS_VERSION = 1  # bump when film_colours changes what it finds, so a kept read of a film's colours is read again
 NEAR = 8             # CIELAB distance (delta E) under which two colours are one: il's six off-white swatches lay within 3.1
                      # of each other and HEX's creams within 5.2, while its red accent is 13 from its orange ground, which an
                      # RGB distance of 40 called one colour (34 apart)
@@ -50,25 +52,23 @@ def spring_velocity_curves(dur):
     move-relative units and divided by the length afterwards could not reach 2.2 Hz on a 0.2 s move (it read 5.0)."""
     import measure
     t = np.linspace(0.0, float(dur), measure.POINTS + 1)
-    grid, curves = [], []
-    for freq in FREQS:
-        w = 2.0 * math.pi * float(freq)
-        for damp in DAMPS:
-            damp = float(damp)
-            if damp < 1.0:
-                wd = w * math.sqrt(1.0 - damp * damp)
-                y = 1.0 - np.exp(-damp * w * t) * (np.cos(wd * t) + (damp * w / wd) * np.sin(wd * t))
-            elif damp == 1.0:
-                y = 1.0 - np.exp(-w * t) * (1.0 + w * t)
-            else:
-                r = math.sqrt(damp * damp - 1.0)
-                a, b = -w * (damp - r), -w * (damp + r)
-                c2 = a / (b - a)
-                c1 = -1.0 - c2
-                y = 1.0 + c1 * np.exp(a * t) + c2 * np.exp(b * t)
-            v = np.abs(np.diff(y))
-            curves.append(v / max(float(v.max()), 1e-9))
-            grid.append((float(freq), damp))
+    # the whole grid at once, (freq, damp, time); each case's arithmetic in the order the one-curve-at-a-time loop had
+    w = 2.0 * math.pi * FREQS[:, None, None]
+    y = np.empty((len(FREQS), len(DAMPS), len(t)))
+    under, critical, over = DAMPS < 1.0, DAMPS == 1.0, DAMPS > 1.0
+    damp = DAMPS[under][None, :, None]
+    wd = w * np.sqrt(1.0 - damp * damp)
+    y[:, under] = 1.0 - np.exp(-damp * w * t) * (np.cos(wd * t) + (damp * w / wd) * np.sin(wd * t))
+    y[:, critical] = 1.0 - np.exp(-w * t) * (1.0 + w * t)
+    damp = DAMPS[over][None, :, None]
+    r = np.sqrt(damp * damp - 1.0)
+    a, b = -w * (damp - r), -w * (damp + r)
+    c2 = a / (b - a)
+    c1 = -1.0 - c2
+    y[:, over] = 1.0 + c1 * np.exp(a * t) + c2 * np.exp(b * t)
+    v = np.abs(np.diff(y, axis=-1))
+    curves = (v / np.maximum(v.max(axis=-1, keepdims=True), 1e-9)).reshape(-1, len(t) - 1)
+    grid = [(float(freq), float(damp)) for freq in FREQS for damp in DAMPS]
     return tuple(grid), np.asarray(curves, dtype=np.float32)
 
 
@@ -103,11 +103,6 @@ def rgb_luma(rgb):
     return 0.2126 * r + 0.7152 * g + 0.0722 * b
 
 
-def rgb_sat(rgb):
-    mx, mn = max(rgb) / 255.0, min(rgb) / 255.0
-    return 0.0 if mx <= 1e-6 else (mx - mn) / mx
-
-
 def to_hex(c):
     return "#%02x%02x%02x" % tuple(int(round(float(v))) for v in c)
 
@@ -131,13 +126,15 @@ def merge_near(items):
     out = []
     for c, w, notes in sorted(items, key=lambda x: -x[1]):
         c = np.asarray(c, float)
-        g = next((g for g in out if apart(g["c"], c) < NEAR), None)
+        lc = lab(c)   # each colour's Lab once, and each group's kept until its colour moves (apart() made both every time)
+        g = next((g for g in out if float(np.linalg.norm(g["lab"] - lc)) < NEAR), None)
         if g is None:
-            out.append({"c": c, "w": float(w), "notes": list(notes)})
+            out.append({"c": c, "w": float(w), "notes": list(notes), "lab": lc})
         else:
             g["c"] = (g["c"] * g["w"] + c * w) / max(g["w"] + w, 1e-9)
             g["w"] += float(w)
             g["notes"] += list(notes)
+            g["lab"] = lab(g["c"])
     return sorted(out, key=lambda g: -g["w"])
 
 
@@ -163,14 +160,17 @@ def film_colours(path, duration=None):
             else:
                 runs.append([k, k + 1, [g]])
         px = rgb.reshape(-1, 3)
-        off = np.linalg.norm(lab(px) - lab(g), axis=1) >= NEAR
-        sel = px[(px.max(axis=1) - px.min(axis=1) >= ACCENT_CHROMA) & off]
+        # Lab only of the strongly coloured pixels, the only ones an accent can be (the same numbers: Lab is per pixel)
+        px = px[px.max(axis=1) - px.min(axis=1) >= ACCENT_CHROMA]
+        sel = px[np.linalg.norm(lab(px) - lab(g), axis=1) >= NEAR] if len(px) else px
         keys = (sel // 32) @ np.array([64, 8, 1])
-        for key in np.unique(keys):
-            mine = sel[keys == key]
+        # every bin's count and sums at once, the bins taken in the order np.unique gave them
+        counts = np.bincount(keys, minlength=512)
+        sums = [np.bincount(keys, weights=sel[:, ch], minlength=512) for ch in range(3)]
+        for key in np.flatnonzero(counts):
             got = hot.setdefault(int(key), [0, np.zeros(3), k * GROUND_STEP])
-            got[0] += len(mine)
-            got[1] += mine.sum(axis=0)
+            got[0] += int(counts[key])
+            got[1] += np.array([sums[0][key], sums[1][key], sums[2][key]])
     held = [(np.mean(cols, axis=0), (b - a) * GROUND_STEP, [[round(a * GROUND_STEP, 2), round(min(b * GROUND_STEP, end), 2)]])
             for a, b, cols in runs if (b - a) * GROUND_STEP >= GROUND_HELD]
     grounds = [{"hex": to_hex(g["c"]), "seconds": round(g["w"], 2), "spans": sorted(g["notes"])} for g in merge_near(held)]
@@ -304,8 +304,23 @@ def compile_beat_table(m, near_fb=None):
     return clock, times, cues
 
 
-def inspect_repo(repo_dir: Path):
-    """Read a target repository's real metadata (name, tagline, CLI/scripts, languages, git stats) without running code."""
+# folders a repository's own code is not in: version control, dependencies, environments, build output
+REPO_SKIP = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"}
+
+
+def repo_files(repo_dir: Path):
+    """Every file in a repository, in order, not descending into a REPO_SKIP folder inside it. Only folders inside
+    count: a repository kept under a folder called build/ is read (it had read none, its path's parts all tested)."""
+    found = []
+    for folder, dirs, names in os.walk(repo_dir):
+        dirs[:] = [d for d in dirs if d not in REPO_SKIP]
+        found.extend(Path(folder, n) for n in names)
+    return sorted(found)
+
+
+def inspect_repo(repo_dir: Path, files=None):
+    """Read a target repository's real metadata (name, tagline, CLI/scripts, languages, git stats) without running code.
+    `files` is repo_files(repo_dir), when the caller has it already."""
     repo_dir = Path(repo_dir).resolve()
     if not repo_dir.exists():
         raise SystemExit(f"--for {repo_dir}: no such folder")
@@ -335,11 +350,13 @@ def inspect_repo(repo_dir: Path):
             if not l.startswith(("#", "<", "!", "|", "-", "`", "[")) and len(l) >= 16:
                 tagline = re.sub(r"\*\*|\*|`|\[([^\]]+)\]\([^)]+\)", r"\1", l).strip()[:110]
                 break
-    py_files = [p for p in repo_dir.rglob("*.py") if ".git" not in p.parts and "node_modules" not in p.parts and "__pycache__" not in p.parts]
-    ts_files = [p for p in list(repo_dir.rglob("*.ts")) + list(repo_dir.rglob("*.tsx")) if ".git" not in p.parts and "node_modules" not in p.parts]
+    files = repo_files(repo_dir) if files is None else files
+    py_files = [p for p in files if os.path.normcase(p.name).endswith(".py")]
+    ts_files = [p for p in files if os.path.normcase(p.name).endswith((".ts", ".tsx"))]
     commits = 0
     try:
-        p = subprocess.run(["git", "-C", str(repo_dir), "rev-list", "--count", "HEAD"], capture_output=True, text=True, timeout=5)
+        p = subprocess.run(["git", "-C", str(repo_dir), "rev-list", "--count", "HEAD"], capture_output=True, text=True, timeout=5,
+                           creationflags=NO_WINDOW)
         if p.returncode == 0 and p.stdout.strip().isdigit():
             commits = int(p.stdout.strip())
     except Exception:
@@ -460,9 +477,24 @@ def compile_dna_cartridge(ref_video: Path, out_dir: Path = None, repo_dir: Path 
     if not ref_video.is_file():
         raise SystemExit(f"no such reference video: {ref_video}")
 
-    # 1. Measure the reference video (cached in ~/.vd/measures)
-    m_dir = Path.home() / ".vd" / "measures" / ("borrow-" + lean.hashlib.sha1(ref_video.read_bytes()).hexdigest()[:12])
-    m = json.loads((m_dir / "measure.json").read_text(encoding="utf-8")) if (m_dir / "measure.json").is_file() else {}
+    # 1. Measure the reference video (cached in ~/.vd/measures, or under VD_OUT's parent). A film vd pin or vd measure
+    # already measured has the same measure.py's measure.json in its measures folder (lean.measures_of: <hash>/vd, or
+    # <hash>-novoice/vd), made by this version: it is read from there rather than measured a second time
+    h = lean.hashlib.sha1()
+    with ref_video.open("rb") as fh:             # in chunks: a long reference read whole held all of it in memory
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    measures = lean.vd_home() / "measures"
+    m = {}
+    for d in (measures / h.hexdigest()[:16] / "vd", measures / (h.hexdigest()[:16] + "-novoice") / "vd"):
+        if (d / "measure.json").is_file():
+            m = json.loads((d / "measure.json").read_text(encoding="utf-8"))
+            if m.get("version") == measure.VERSION:
+                break
+            m = {}
+    m_dir = measures / ("borrow-" + h.hexdigest()[:12])
+    if not m and (m_dir / "measure.json").is_file():
+        m = json.loads((m_dir / "measure.json").read_text(encoding="utf-8"))
     if m.get("version") != measure.VERSION:  # made by another measure.py, or never: its numbers are measured again
         measure.measure(ref_video, m_dir)
         m = json.loads((m_dir / "measure.json").read_text(encoding="utf-8"))
@@ -492,7 +524,21 @@ def compile_dna_cartridge(ref_video: Path, out_dir: Path = None, repo_dir: Path 
               + ", so there is no spring or curve of this film's to take; read its moves from the frames")
 
     # 3. Extract palette, ink bands, archetype, and beat clock
-    palette = extract_palette_and_ink(m, film_colours(ref_video, m.get("duration")))
+    # the film's colours are read once and kept beside its measures, keyed by its bytes, its length and this reading
+    kept = measures / f"colours-{h.hexdigest()[:16]}.json"
+    try:
+        said = json.loads(kept.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        said = {}
+    if said.get("version") == COLOURS_VERSION and said.get("duration") == m.get("duration"):
+        colours = said["colours"]
+    else:
+        colours = film_colours(ref_video, m.get("duration"))
+        kept.parent.mkdir(parents=True, exist_ok=True)
+        part = kept.with_name(kept.name + ".part")
+        part.write_text(json.dumps({"version": COLOURS_VERSION, "duration": m.get("duration"), "colours": colours}), encoding="utf-8")
+        part.replace(kept)
+    palette = extract_palette_and_ink(m, colours)
     # Which worked film this is like is chosen, not measured: on the four accepted films the measures that once picked it
     # named all four `onoma`, and Onoma and Plus One are near twins on every one of them (6.2 and 6.5 events in 10 s,
     # largest type band 0.259 and 0.257). A kind is what a film shows; these numbers are how it moves.

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """`vd bridge` (not proven on a film): the export's cuts for an editor or for legible-film. Writes `cues.json` (the shape
 legible-film's cue_list.py reads, bound by stream hash to the exported file), `picture-timing.json`, a Final Cut Pro 7 XML
-file (`timeline.xml`) and an OpenTimelineIO file (`timeline.otio`). The XML counts the host in-point into the sequence's
-length and the OTIO does not, and the XML always names two sound tracks. No editing program has opened either.
+file (`timeline.xml`) and an OpenTimelineIO file (`timeline.otio`). Both place the picture and the sound the file has
+alike, with `--host-in` as a gap before them. No editing program has opened either.
 
   python bridge.py [--film DIR] [--video HERO.mp4] [-o BridgeDir] [--host-in 0.0]
 """
@@ -10,13 +10,11 @@ import argparse
 import fractions
 import hashlib
 import json
-import math
 import os
 import re
 import shutil
 import subprocess
 import sys
-import urllib.parse
 import xml.etree.ElementTree as ET
 from fractions import Fraction
 from pathlib import Path
@@ -50,6 +48,13 @@ def is_turned(stream):
     return bool(any(sd.get("rotation") for sd in stream.get("side_data_list") or []) or rotate_tag not in ("0", "-0", ""))
 
 
+def ticks_us(ticks, base):
+    """ticks of time base `base` (a Fraction) in whole microseconds, rounded half to even: round(ticks * base * 1000000)
+    in whole numbers, without a Fraction made for every packet."""
+    q, r = divmod(ticks * base.numerator * 1000000, base.denominator)
+    return q + 1 if 2 * r > base.denominator or (2 * r == base.denominator and q & 1) else q
+
+
 def picture_identity_and_schedule(video_path: Path):
     """Compute exact legible-film `cue_list.py` picture identity: packet stream SHA-256, display geometry,
     and microsecond frame presentation schedule (`picture-timing.json`)."""
@@ -57,20 +62,16 @@ def picture_identity_and_schedule(video_path: Path):
     ffprobe = shutil.which("ffprobe")
     if not ffmpeg or not ffprobe:
         raise RuntimeError("ffmpeg and ffprobe are required on PATH")
-    p_hash = subprocess.run(
-        [ffmpeg, "-hide_banner", "-nostdin", "-v", "error", "-i", str(video_path), "-map", "0:v:0", "-c", "copy", "-f", "hash", "-hash", "sha256", "-"],
+    # one ffprobe for the streams and their packets: the first video stream's geometry, rate and packets, and the first
+    # sound stream's channels and rate for the timelines (three ffprobes had each read the file)
+    probed = json.loads(subprocess.run(
+        [ffprobe, "-v", "error", "-show_streams", "-show_entries", "packet=stream_index,pts,duration,flags", "-of", "json", str(video_path)],
         capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=NO_WINDOW, check=True,
-    ).stdout
-    m = re.search(r"SHA256=([0-9a-f]{64})", p_hash)
-    if not m:
-        raise RuntimeError(f"no video stream hash for {video_path}")
-    stream_sha = m.group(1)
-
-    streams_out = subprocess.run(
-        [ffprobe, "-v", "error", "-select_streams", "v:0", "-show_streams", "-of", "json", str(video_path)],
-        capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=NO_WINDOW, check=True,
-    ).stdout
-    stream = (json.loads(streams_out).get("streams") or [{}])[0]
+    ).stdout or "{}")
+    streams = probed.get("streams") or []
+    stream = next((st for st in streams if st.get("codec_type") == "video"), {})
+    heard = next((st for st in streams if st.get("codec_type") == "audio"), None)
+    sound = (int(heard.get("channels") or 2), int(heard.get("sample_rate") or 48000)) if heard else None
     w = int(stream.get("width") or 1920)
     h = int(stream.get("height") or 1080)
     cw = int(stream.get("coded_width") or w) or w
@@ -82,6 +83,15 @@ def picture_identity_and_schedule(video_path: Path):
     if sar not in ("1:1", "0:1", "N/A") or turned:
         raise SystemExit(f"vd bridge: {Path(video_path).name} has non-square pixels ({sar}) or is turned; the bridge binds only "
                          "square, upright pictures. Export it square (vd export does).")
+    # the stream is hashed only once it is known to be one the bridge binds
+    p_hash = subprocess.run(
+        [ffmpeg, "-hide_banner", "-nostdin", "-v", "error", "-i", str(video_path), "-map", "0:v:0", "-c", "copy", "-f", "hash", "-hash", "sha256", "-"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=NO_WINDOW, check=True,
+    ).stdout
+    m = re.search(r"SHA256=([0-9a-f]{64})", p_hash)
+    if not m:
+        raise RuntimeError(f"no video stream hash for {video_path}")
+    stream_sha = m.group(1)
     geometry = {
         "width": w,
         "height": h,
@@ -105,19 +115,14 @@ def picture_identity_and_schedule(video_path: Path):
             pass
     fps_exact = f"{rate.numerator}/{rate.denominator}"
     base = fractions.Fraction(stream.get("time_base") or "1/60")
-    pkt_rows = subprocess.run(
-        [ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts,duration,flags", "-of", "compact=p=0:nk=0", str(video_path)],
-        capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=NO_WINDOW, check=True,
-    ).stdout
     packets = []
-    for line in pkt_rows.splitlines():
-        fields = dict(part.split("=", 1) for part in line.strip().split("|") if "=" in part)
-        if not fields or "D" in fields.get("flags", "") or fields.get("pts") in (None, "", "N/A"):
+    for fields in probed.get("packets") or []:
+        if fields.get("stream_index") != stream.get("index") or "D" in fields.get("flags", "") or fields.get("pts") in (None, "", "N/A"):
             continue
         dur = fields.get("duration")
         packets.append((int(fields["pts"]), None if dur in (None, "", "N/A") else int(dur)))
     packets.sort()
-    to_us = lambda ticks: int(round(ticks * base * 1000000))
+    to_us = lambda ticks: ticks_us(ticks, base)
     pts_us = [to_us(p) for p, _ in packets]
     frame_us = int(round(1000000 / float(rate)))
     durations_us = []
@@ -155,7 +160,8 @@ def picture_identity_and_schedule(video_path: Path):
         "width": w,
         "height": h,
         "frames": schedule["frames"],
-        "duration_s": round(schedule["frames"] / float(rate), 6),
+        "duration_s": round((schedule["visible_end_us"] - schedule["visible_start_us"]) / 1e6, 6),
+        "audio": sound,
     }
 
 
@@ -175,7 +181,7 @@ def build_cues_v2(film_dir: Path, video_path: Path, pic_info: dict, out_dir: Pat
             a_t, b_t = float(b["from"]), min(dur, float(b["to"]))
             if b_t > a_t:
                 sections.append({
-                    "id": b.get("name") or f"beat_{i + 1}",
+                    "id": b.get("name") or b.get("id") or f"beat_{i + 1}",
                     "a": round(a_t, 4),
                     "b": round(b_t, 4),
                     "clock": "speech" if s.get("voice") else "music",
@@ -291,7 +297,7 @@ def audio_of(video_path: Path):
     if not ffprobe:
         raise SystemExit("vd bridge: ffprobe is not on PATH; vd doctor says how to get it")
     p = subprocess.run([ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=channels,sample_rate", "-of", "json",
-                        str(video_path)], capture_output=True, text=True, encoding="utf-8", errors="replace")
+                        str(video_path)], capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
     streams = (json.loads(p.stdout or "{}").get("streams") or []) if p.returncode == 0 else []
     if not streams:
         return None
@@ -320,7 +326,7 @@ def build_xmeml_and_otio(film_dir: Path, video_path: Path, pic_info: dict, cues_
     end_frame = start_frame + frames
     ticks_out = int(round(Fraction(frames) / rate * TICKS_PER_SECOND))
     url = localhost_file_url(video_path)
-    sound = audio_of(video_path)
+    sound = pic_info["audio"] if "audio" in pic_info else audio_of(video_path)
 
     root = ET.Element("xmeml", {"version": "5"})
     seq = ET.SubElement(root, "sequence", {"id": "sequence-1"})
@@ -487,15 +493,20 @@ def build_xmeml_and_otio(film_dir: Path, video_path: Path, pic_info: dict, cues_
     }
     tracks = otio_doc["tracks"]["children"]
     video_clip = tracks[0]["children"][0]
-    gap = [{"OTIO_SCHEMA": "Gap.1", "name": "host in",
-            "source_range": {"OTIO_SCHEMA": "TimeRange.1",
-                             "start_time": {"OTIO_SCHEMA": "RationalTime.1", "rate": float(rate), "value": 0.0},
-                             "duration": {"OTIO_SCHEMA": "RationalTime.1", "rate": float(rate), "value": float(start_frame)}}}] if start_frame else []
-    tracks[0]["children"] = gap + [video_clip]
+
+    def _gap_clip():
+        if not start_frame:
+            return []
+        return [{"OTIO_SCHEMA": "Gap.1", "name": "host in",
+                 "source_range": {"OTIO_SCHEMA": "TimeRange.1",
+                                  "start_time": {"OTIO_SCHEMA": "RationalTime.1", "rate": float(rate), "value": 0.0},
+                                  "duration": {"OTIO_SCHEMA": "RationalTime.1", "rate": float(rate), "value": float(start_frame)}}}]
+
+    tracks[0]["children"] = _gap_clip() + [video_clip]
     if sound:
         # the film's sound, on its own track under the picture, from the same file
         tracks.append({"OTIO_SCHEMA": "Track.1", "name": "A1", "kind": "Audio",
-                       "children": json.loads(json.dumps(gap)) + [{k: v for k, v in video_clip.items() if k != "markers"} | {"markers": []}]})
+                       "children": _gap_clip() + [{k: v for k, v in video_clip.items() if k != "markers"} | {"markers": []}]})
     otio_path = out_dir / "timeline.otio"
     otio_path.write_text(json.dumps(otio_doc, indent=1) + "\n", encoding="utf-8")
     return xml_path, otio_path

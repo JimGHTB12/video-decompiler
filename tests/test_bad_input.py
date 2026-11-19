@@ -65,6 +65,24 @@ def test_a_window_or_rate_that_isnt_one_is_refused():
         refused(tool("film_diff.py", video, video, "--out", TMP / "diff", *args), words)
     code, out = tool("film_diff.py", video, clip("window1.mp4", seconds=1), "--out", TMP / "diff", "--from", "1", "--to", "2")
     assert code == 0, f"a window inside the clip still compares: {out[-300:]}"
+    # C8: blur.py on an input shorter than --open removes the empty output file, and reads stream=nb_frames without -count_packets on valid MP4s
+    two_frames = TMP / "two_frames.mp4"
+    ffmpeg("-f", "lavfi", "-i", "testsrc2=s=160x90:r=24:d=1", "-frames:v", "2", "-pix_fmt", "yuv420p", "-c:v", "libx264", two_frames)
+    empty_blur = TMP / "empty_blur.mp4"
+    refused(tool("blur.py", two_frames, empty_blur, "--sub", "8", "--open", "4", "--fps", "24"), "gave no frames")
+    assert not empty_blur.exists(), "blur.py removed the empty output file"
+    from unittest.mock import patch
+    sys.path.insert(0, str(TOOLS))
+    import blur
+    assert not hasattr(blur, "groups"), "dead blur.groups removed"
+    probe_cmds = []
+    real_run = blur.subprocess.run
+    good_blur = TMP / "good_blur.mp4"
+    with patch.object(blur.subprocess, "run", side_effect=lambda cmd, *a, **k: (
+            probe_cmds.append(list(cmd)) if cmd and cmd[0] == "ffprobe" else None, real_run(cmd, *a, **k))[1]), \
+            patch.object(sys, "argv", ["blur.py", str(video), str(good_blur), "--sub", "4", "--open", "2", "--fps", "6"]):
+        blur.main()
+    assert good_blur.is_file() and len(probe_cmds) == 1 and "-count_packets" not in probe_cmds[0], probe_cmds
 
 
 def test_keep_never_clears_a_folder_it_did_not_fill():
@@ -88,8 +106,9 @@ def test_a_still_or_a_missing_file_is_named():
     # printed the raw ffprobe command
     video = clip("named.mp4")
     for bad, words in ((still(), "is a still image, not a video"), (TMP / "not here.mp4", "no such file")):
-        for name, args in (("measure.py", [bad, "--out", TMP / "m"]), ("see.py", [bad, "--out", TMP / "s"]), ("sheet.py", [bad, "-o", TMP / "s.jpg"]),
-                           ("film_diff.py", [bad, video, "--out", TMP / "d"]), ("timecheck.py", [bad])):
+        for name, args in (("measure.py", [bad, "--out", TMP / "m"]), ("measure_film.py", [bad, TMP / "mf", "--no-voice"]),
+                           ("see.py", [bad, "--out", TMP / "s"]), ("sheet.py", [bad, "-o", TMP / "s.jpg"]),
+                           ("film_diff.py", [bad, video, "--out", TMP / "d"]), ("timecheck.py", [bad]), ("space.py", [bad])):
             refused(tool(name, *args), words)
 
 
@@ -106,6 +125,16 @@ def test_a_webm_with_no_length_in_its_header_is_read():
         code, out = tool(name, *args)
         assert code == 0 and "Traceback" not in out, f"{name} reads it: {out[-400:]}"
     assert abs(json.loads((TMP / "wm" / "measure.json").read_text(encoding="utf-8"))["duration"] - 3.0) < 0.05, "at its real length"
+    sys.path.insert(0, str(TOOLS))
+    import measure_film
+    assert abs(measure_film.probe(webm)["duration"] - 3.0) < 0.05, "measure_film.probe reads streamed WebM length"
+    rot = TMP / "rotated.mp4"
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-display_rotation", "90", "-i", str(clip("up.mp4")), "-c", "copy", str(rot)], check=True)
+    pr = measure_film.probe(rot)
+    assert (pr["w"], pr["h"]) == (90, 160), f"measure_film.probe reads shown size of rotated clip: {pr}"
+    import pack
+    p_webm, key_webm, _ = pack.make(webm, [], TMP / "wpack_out", cache_root=TMP / "wpack_cache", reads_root=TMP / "wpack_reads")
+    assert key_webm.is_file() and list((p_webm / "alone").glob("story-*.jpg")) and pack.spans_of(webm, first=1.0, last=1.0)[1][1] > 2.5
 
 
 def test_a_length_from_packets_is_whole_or_refused():
@@ -132,8 +161,104 @@ def test_a_length_from_packets_is_whole_or_refused():
     assert code == 0, f"and the whole one compares to its end: {out[-300:]}"
 
 
-TESTS = [test_a_window_or_rate_that_isnt_one_is_refused, test_keep_never_clears_a_folder_it_did_not_fill,
-         test_a_still_or_a_missing_file_is_named, test_a_webm_with_no_length_in_its_header_is_read, test_a_length_from_packets_is_whole_or_refused]
+def test_a_header_that_gives_an_end_time_is_read_as_a_length():
+    # a review's finding: a 5 s picture offset to 3600 s in Matroska says duration 3605 in its header (an end time, not
+    # a length); measure.json said 3605 s and every rate per ten seconds was divided by it. A header that is a length
+    # stays one: an MP4 whose sound runs 2 s past the picture and starts after 0, and a transport stream starting at -1 s.
+    sys.path.insert(0, str(TOOLS))
+    import film_diff
+    import measure_film
+    pulse = TMP / "pulse.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=30:duration=5", "-c:v", "libx264", "-g", "30",
+                    "-pix_fmt", "yuv420p", str(pulse)], check=True)
+    made = {"late.mkv": ["-itsoffset", "3600", "-i", pulse, "-c:v", "copy", "-avoid_negative_ts", "disabled"],
+            "late.mp4": ["-itsoffset", "3600", "-i", pulse, "-c:v", "copy"],
+            "longer sound.mp4": ["-i", pulse, "-f", "lavfi", "-t", "7", "-i", "anullsrc=r=48000:cl=stereo", "-c:v", "copy", "-c:a", "aac", "-output_ts_offset", "2"],
+            "before zero.ts": ["-copyts", "-itsoffset", "-1", "-i", pulse, "-c", "copy", "-avoid_negative_ts", "disabled", "-mpegts_copyts", "1", "-muxdelay", "0"]}
+    for name, args in made.items():
+        subprocess.run(["ffmpeg", "-v", "error", "-y", *map(str, args), str(TMP / name)], check=True)
+    for name in ("late.mkv", "late.mp4"):
+        assert abs(film_diff.ffprobe(TMP / name)["duration"] - 5.0) < 0.05, (name, film_diff.ffprobe(TMP / name))
+        assert abs(measure_film.probe(TMP / name)["duration"] - 5.0) < 0.05, (name, measure_film.probe(TMP / name))
+    code, out = tool("measure.py", TMP / "late.mkv", "--out", TMP / "late")
+    assert code == 0, out[-300:]
+    import json
+    said = json.loads((TMP / "late" / "measure.json").read_text(encoding="utf-8"))["duration"]
+    assert abs(said - 5.0) < 0.05, f"measure.json's duration of a 5 s picture at 3600 s: {said}"
+    longer = film_diff.ffprobe(TMP / "longer sound.mp4")
+    assert longer["start_time"] > 1 and abs(longer["duration"] - 7.0) < 0.1, f"a header that is a length stays one: {longer}"
+    before = film_diff.ffprobe(TMP / "before zero.ts")
+    assert before["start_time"] < 0 and abs(before["duration"] - 5.0) < 0.1, f"a stream starting before 0 keeps its length: {before}"
+    # a review's finding: in a cut-off file the last packet left ends far before the header's value, which was read as
+    # a sign the header is an end time. A 5 s picture starting at 6 s, cut to a quarter, came out -1 s long, and
+    # measure.py took the half that was left of a 10 s film starting at 5 s for a whole 5 s film
+    for name, length, offset, keep in (("cut a.mp4", 5, 6.0, 0.25), ("cut b.mp4", 10, 5.0, 0.55)):
+        whole = TMP / ("whole " + name)
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"testsrc2=size=160x90:rate=30:duration={length}", "-c:v", "libx264",
+                        "-g", "15", "-pix_fmt", "yuv420p", "-output_ts_offset", str(offset), "-movflags", "+faststart", str(whole)], check=True)
+        data = whole.read_bytes()
+        (TMP / name).write_bytes(data[: int(len(data) * keep)])
+        cut = film_diff.ffprobe(TMP / name)
+        assert abs(cut["duration"] - length) < 0.05, f"a cut-off file keeps the length its header gives: {name} {cut}"
+        code, out = tool("measure.py", TMP / name, "--out", TMP / ("out " + name))
+        assert code != 0 and "stopped reading" in out, f"and measure.py refuses it, as it did: {name} {code} {out[-200:]}"
+    # the re-check's finding: the same 10 s MP4 cut on a packet's edge, where the film had run as long as its header's
+    # length says, gives ffprobe nothing to complain of, and its last packet ends at the header's value: it read as an
+    # end time, and half the film passed for a whole 5 s one. An MP4's header is a length; only Matroska's is an end time
+    import json
+    whole = TMP / "whole edge.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=30:duration=10", "-c:v", "libx264", "-g", "15",
+                    "-bf", "0", "-pix_fmt", "yuv420p", "-output_ts_offset", "5.0", "-movflags", "+faststart", str(whole)], check=True)
+    packets = json.loads(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "packet=pts_time,pos,size", "-of", "json", str(whole)],
+                                        capture_output=True, text=True, check=True).stdout)["packets"]
+    edge = min(packets, key=lambda p: abs(float(p["pts_time"]) - 10.0))      # the frame shown at 10 s: 5 s into the film
+    (TMP / "cut edge.mp4").write_bytes(whole.read_bytes()[: int(edge["pos"]) + int(edge["size"])])
+    quiet = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "packet=pts_time", "-of", "csv=p=0", str(TMP / "cut edge.mp4")], capture_output=True, text=True)
+    assert quiet.returncode == 0 and not quiet.stderr.strip(), f"the fixture is a cut ffprobe reads without complaint: {quiet.stderr[-200:]}"
+    edge_cut = film_diff.ffprobe(TMP / "cut edge.mp4")
+    assert abs(edge_cut["duration"] - 10.0) < 0.05, f"an MP4 cut on a packet's edge keeps the length its header gives: {edge_cut}"
+    # an FLV's stored length is a length too: the same cut on a tag's edge (the tag's 16 bytes of headers after its
+    # position, then its data) read as an end time before FLV was left out with MP4
+    whole = TMP / "whole edge.flv"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=30:duration=10", "-c:v", "libx264", "-g", "15",
+                    "-bf", "0", "-pix_fmt", "yuv420p", "-output_ts_offset", "5.0", str(whole)], check=True)
+    packets = json.loads(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "packet=pts_time,pos,size", "-of", "json", str(whole)],
+                                        capture_output=True, text=True, check=True).stdout)["packets"]
+    edge = min(packets, key=lambda p: abs(float(p["pts_time"]) - 10.0))
+    (TMP / "cut edge.flv").write_bytes(whole.read_bytes()[: int(edge["pos"]) + int(edge["size"]) + 16])
+    quiet = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "packet=pts_time", "-of", "csv=p=0", str(TMP / "cut edge.flv")], capture_output=True, text=True)
+    assert quiet.returncode == 0 and not quiet.stderr.strip(), f"the fixture is an FLV cut ffprobe reads without complaint: {quiet.stderr[-200:]}"
+    flv_cut = film_diff.ffprobe(TMP / "cut edge.flv")
+    assert abs(flv_cut["duration"] - 10.0) < 0.05, f"an FLV cut on a tag's edge keeps the length its header gives: {flv_cut}"
+    # the confirmation's finding: a Windows Media file's header is an end time as Matroska's is, and asking only
+    # Matroska left a 5 s picture offset to an hour 3605 s long again
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=30:duration=5", "-c:v", "wmv2", "-b:v", "200k",
+                    "-pix_fmt", "yuv420p", "-output_ts_offset", "3600", str(TMP / "late.asf")], check=True)
+    late_asf = film_diff.ffprobe(TMP / "late.asf")
+    assert late_asf["start_time"] > 3599 and abs(late_asf["duration"] - 5.0) < 0.1, f"a Windows Media header that is an end time is read as a length: {late_asf}"
+
+
+def test_a_film_is_probed_once_until_it_changes():
+    # D5: ffprobe() was asked eight to ten times a film in one vd pack; it is asked once a process for a file as it stands,
+    # and again once the file changes (a new picture written at the same path)
+    sys.path.insert(0, str(TOOLS))
+    from unittest.mock import patch
+    import film_diff
+    clip = TMP / "probed once.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=30:duration=1", "-pix_fmt", "yuv420p", str(clip)], check=True)
+    real, calls = film_diff.subprocess.run, []
+    with patch.object(film_diff.subprocess, "run", lambda cmd, **k: ((calls.append(cmd[0]) if cmd[0] == "ffprobe" else None), real(cmd, **k))[1]):
+        first = film_diff.ffprobe(clip)
+        first["w"] = -1                                       # a caller changing its copy changes nothing kept
+        again = film_diff.ffprobe(clip)
+        assert calls == ["ffprobe"] and again["w"] == 160, (calls, again)
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30:duration=2", "-pix_fmt", "yuv420p", str(clip)], check=True)
+        assert film_diff.ffprobe(clip)["w"] == 320 and calls == ["ffprobe", "ffprobe"], calls
+
+
+TESTS = [test_a_film_is_probed_once_until_it_changes, test_a_window_or_rate_that_isnt_one_is_refused, test_keep_never_clears_a_folder_it_did_not_fill,
+         test_a_still_or_a_missing_file_is_named, test_a_webm_with_no_length_in_its_header_is_read, test_a_length_from_packets_is_whole_or_refused,
+         test_a_header_that_gives_an_end_time_is_read_as_a_length]
 
 
 def main():
